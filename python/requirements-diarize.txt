@@ -1,0 +1,7 @@
+# earshot diarization dependencies (separate from transcription because this
+# pulls in torch/torchaudio, which is large). Installed into the same venv by:
+#   ./install.sh --with-diarize
+#
+# On the DGX Spark you may need a CUDA-matched torch build; if the default wheel
+# lands as CPU-only, reinstall torch from the appropriate CUDA index first.
+pyannote.audio>=3.1

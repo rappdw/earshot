@@ -1,0 +1,658 @@
+#!/usr/bin/env bash
+# earshot - fully-local meeting capture, transcription, and diarization.
+#
+# Subcommands:
+#   earshot rec [opts]          capture a meeting to two channels
+#   earshot devices             list current audio input devices and indices
+#   earshot transcribe DIR ...  transcribe a meeting folder (faster-whisper)
+#   earshot diarize DIR ...     split REMOTE into speakers + attribute names
+#   earshot enroll NAME ...     add a voice to the speaker library
+#   earshot speakers [list|remove|rename] ...   manage the speaker library
+#   earshot offload DIR ...     run transcribe/diarize on the DGX Spark over SSH
+#   earshot help                this help
+#
+# rec options:
+#   -p, --profile    capture profile (obsbot | mba | d4 ...). Default from config.
+#   -c, --context    context routing recordings to a dir (business | personal ...).
+#   -t, --title      meeting title; used in the folder name. Prompts if omitted.
+#   -o, --out        output root dir; overrides the context. Default from config.
+#   -r, --rate       sample rate. Default from config (48000).
+#   --auto-stop N    stop after N sec of call-audio silence (default from config)
+#   --no-auto-stop   disable silence auto-stop for this recording
+#   --max-min N      hard cap recording length in minutes (0 = no cap)
+#
+# transcribe/diarize options: run `earshot transcribe -h` / `earshot diarize -h`.
+# diarize/enroll/speakers/offload take -c/--context (business|personal) to pick
+# the per-context speaker library; inferred from the meeting path if omitted.
+#
+# Capture records BlackHole and your mic as two parallel ffmpeg processes,
+# resolved BY NAME. A recording stops on Enter, on Ctrl-C, or automatically
+# after a sustained silence on the call channel (a meeting that has ended).
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# ===========================================================================
+# Audio device helpers (avfoundation)
+# ===========================================================================
+_av_list_raw() {
+  # ffmpeg prints the device list to stderr and then errors on the empty input;
+  # that trailing error is expected and harmless.
+  ffmpeg -f avfoundation -list_devices true -i "" 2>&1 || true
+}
+
+_av_audio_section() {
+  # Emit "<index>\t<name>" for each audio device. Uses only BSD-awk-safe sub().
+  # Input lines look like: "[AVFoundation indev @ 0x..] [7] Aggregate OBSBOT"
+  _av_list_raw | awk '
+    /AVFoundation audio devices:/ {inaudio=1; next}
+    /AVFoundation video devices:/ {inaudio=0}
+    inaudio {
+      line=$0
+      sub(/^\[[^]]*\] /, "", line)        # strip the "[AVFoundation indev @ ..] " prefix
+      if (line ~ /^\[[0-9]+\]/) {
+        idx=line;  sub(/^\[/, "", idx);  sub(/\].*/, "", idx)
+        name=line; sub(/^\[[0-9]+\] /, "", name)
+        print idx "\t" name
+      }
+    }'
+}
+
+av_resolve() {
+  # Print the index for an exact device-name match, or fail.
+  local want="$1" idx name
+  while IFS=$'\t' read -r idx name; do
+    if [ "$name" = "$want" ]; then
+      printf '%s\n' "$idx"
+      return 0
+    fi
+  done < <(_av_audio_section)
+  return 1
+}
+
+av_print_list() {
+  echo "Current audio input devices (index  name):"
+  _av_audio_section | while IFS=$'\t' read -r idx name; do
+    printf '  %-3s %s\n' "$idx" "$name"
+  done
+}
+
+# ===========================================================================
+# Config (only needed for capture)
+# ===========================================================================
+load_config() {
+  local conf=""
+  if [ -n "${EARSHOT_CONF:-}" ] && [ -f "${EARSHOT_CONF}" ]; then
+    conf="${EARSHOT_CONF}"
+  else
+    local c
+    for c in \
+      "${SCRIPT_DIR}/../etc/earshot.conf" \
+      "${HOME}/.config/earshot/earshot.conf" \
+      "/usr/local/etc/earshot.conf"; do
+      if [ -f "$c" ]; then conf="$c"; break; fi
+    done
+  fi
+  if [ -z "${conf}" ]; then
+    echo "earshot: no earshot.conf found (set EARSHOT_CONF or create etc/earshot.conf)" >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1090
+  . "${conf}"
+}
+
+# Infer a context name from a meeting directory path by matching the configured
+# output roots. Echoes "business"/"personal"/"" (config must already be loaded).
+infer_context_from_dir() {
+  local d
+  d="$(cd "$1" 2>/dev/null && pwd || printf '%s' "$1")"
+  case "${d}/" in
+    "${EARSHOT_OUT_ROOT_PERSONAL%/}/"*) printf 'personal\n' ;;
+    "${EARSHOT_OUT_ROOT_BUSINESS%/}/"*) printf 'business\n' ;;
+    *) printf '\n' ;;
+  esac
+}
+
+# Select the speaker library for a context and export EARSHOT_SPEAKERS so the
+# Python tools pick it up. Args: $1 explicit context (may be ""), $2 candidate
+# meeting dir (may be ""). Precedence: explicit -c > inferred from dir > default.
+resolve_speakers_lib() {
+  load_config
+  local ctx="$1" dir="$2"
+  if [ -z "${ctx}" ] && [ -n "${dir}" ]; then
+    ctx="$(infer_context_from_dir "${dir}")"
+  fi
+  [ -z "${ctx}" ] && ctx="${EARSHOT_DEFAULT_CONTEXT:-}"
+  [ -z "${ctx}" ] && return 0   # contexts disabled; leave EARSHOT_SPEAKERS as-is
+  if ! earshot_load_context "${ctx}"; then
+    echo "earshot: unknown context '${ctx}' (check earshot.conf)" >&2; exit 1
+  fi
+  if [ -n "${CONTEXT_SPEAKERS:-}" ]; then
+    export EARSHOT_SPEAKERS="${CONTEXT_SPEAKERS}"
+    echo "earshot: context=${ctx} speakers=${EARSHOT_SPEAKERS}" >&2
+  fi
+}
+
+# ===========================================================================
+# Python runner (transcribe / diarize)
+# ===========================================================================
+run_py() {
+  local script_name="$1"; shift
+  local venv="${EARSHOT_VENV:-${HOME}/.local/share/earshot/venv}"
+  local py="${venv}/bin/python"
+  local script="" cand
+  for cand in \
+    "${HOME}/.local/share/earshot/${script_name}" \
+    "${SCRIPT_DIR}/../python/${script_name}"; do
+    if [ -f "$cand" ]; then script="$cand"; break; fi
+  done
+  if [ -z "${script}" ]; then
+    echo "earshot: ${script_name} not found (run install.sh)" >&2; exit 1
+  fi
+  if [ ! -x "${py}" ]; then
+    echo "earshot: Python venv not found at ${venv}" >&2
+    echo "Set it up with:  ./install.sh --with-python   (add --with-diarize for diarize)" >&2
+    exit 1
+  fi
+  exec "${py}" "${script}" "$@"
+}
+
+cmd_transcribe() {
+  run_py transcribe.py "$@"
+}
+
+cmd_diarize() {
+  # pull out -c/--context; pass the rest through untouched
+  local ctx="" rest=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -c|--context) ctx="$2"; shift 2 ;;
+      *) rest+=("$1"); shift ;;
+    esac
+  done
+  # infer the meeting dir as the first existing directory among the args
+  local dir="" t
+  for t in ${rest[@]+"${rest[@]}"}; do [ -d "${t}" ] && { dir="${t}"; break; }; done
+  resolve_speakers_lib "${ctx}" "${dir}"
+
+  local venv="${EARSHOT_VENV:-${HOME}/.local/share/earshot/venv}"
+  local py="${venv}/bin/python"
+  if [ -x "${py}" ] && ! "${py}" -c "import pyannote.audio" >/dev/null 2>&1; then
+    echo "earshot: pyannote.audio not installed in the venv." >&2
+    echo "Install it with:  ./install.sh --with-diarize" >&2
+    exit 1
+  fi
+  run_py diarize.py ${rest[@]+"${rest[@]}"}
+}
+
+# speakers.py needs only stdlib for list/remove/rename/enroll-from-meeting, so
+# fall back to system python3 when the venv is not built. (enroll --file still
+# needs the venv's pyannote and will say so.)
+run_speakers() {
+  # pull out -c/--context; the rest goes to speakers.py
+  local ctx="" rest=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -c|--context) ctx="$2"; shift 2 ;;
+      *) rest+=("$1"); shift ;;
+    esac
+  done
+  # for enroll --from DIR, infer context from that dir
+  local dir="" t
+  for t in ${rest[@]+"${rest[@]}"}; do [ -d "${t}" ] && { dir="${t}"; break; }; done
+  resolve_speakers_lib "${ctx}" "${dir}"
+
+  local venv="${EARSHOT_VENV:-${HOME}/.local/share/earshot/venv}"
+  local py="${venv}/bin/python"
+  if [ ! -x "${py}" ]; then py="$(command -v python3 || true)"; fi
+  if [ -z "${py}" ]; then echo "earshot: no python found" >&2; exit 1; fi
+  local script="" cand
+  for cand in \
+    "${HOME}/.local/share/earshot/speakers.py" \
+    "${SCRIPT_DIR}/../python/speakers.py"; do
+    if [ -f "$cand" ]; then script="$cand"; break; fi
+  done
+  if [ -z "${script}" ]; then
+    echo "earshot: speakers.py not found (run install.sh)" >&2; exit 1
+  fi
+  exec "${py}" "${script}" ${rest[@]+"${rest[@]}"}
+}
+
+cmd_devices() {
+  av_print_list
+}
+
+# ===========================================================================
+# Spark offload (SSH + rsync, remote work in tmux so it survives disconnects)
+# ===========================================================================
+cmd_offload() {
+  load_config
+
+  local HOST="${EARSHOT_SPARK_HOST:-}"
+  local RROOT="${EARSHOT_SPARK_DIR:-earshot-work}"
+  local RCMD="${EARSHOT_SPARK_EARSHOT:-~/.local/bin/earshot}"
+  local SSH_OPTS="${EARSHOT_SSH_OPTS:-}"
+  local MOSH="${EARSHOT_MOSH:-mosh}"
+  local POLL="${EARSHOT_POLL_SECS:-5}"
+  local DEVICE="cuda"
+  local DO_TX=0 DO_DZ=0 RM_REMOTE=0 WATCH=1 COLLECT=0 FORCE=0
+  local TX_ARGS="" DZ_ARGS="" DIR="" CTX=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --host)        HOST="$2"; shift 2 ;;
+      --remote-dir)  RROOT="$2"; shift 2 ;;
+      --remote-cmd)  RCMD="$2"; shift 2 ;;
+      --device)      DEVICE="$2"; shift 2 ;;
+      -c|--context)  CTX="$2"; shift 2 ;;
+      --transcribe)  DO_TX=1; shift ;;
+      --diarize)     DO_DZ=1; shift ;;
+      --watch)       WATCH=1; shift ;;
+      --no-watch)    WATCH=0; shift ;;
+      --collect)     COLLECT=1; shift ;;
+      --force)       FORCE=1; shift ;;
+      --rm-remote)   RM_REMOTE=1; shift ;;
+      --poll)        POLL="$2"; shift 2 ;;
+      --tx-args)     TX_ARGS="$2"; shift 2 ;;
+      --dz-args)     DZ_ARGS="$2"; shift 2 ;;
+      -h|--help)
+        echo "usage: earshot offload DIR [--transcribe] [--diarize] [-c CONTEXT]"
+        echo "                          [--device cuda] [--no-watch] [--collect]"
+        echo "                          [--force] [--rm-remote] [--host H]"
+        echo "                          [--remote-dir D] [--remote-cmd C]"
+        echo "                          [--tx-args \"...\"] [--dz-args \"...\"] [--poll N]"
+        echo
+        echo "Remote work runs in a tmux session 'earshot-<dir>' so it survives a"
+        echo "disconnect. Default: launch and attach live via mosh+tmux (like 'dgx');"
+        echo "detach with Ctrl-b d and the job keeps running."
+        echo "  --no-watch don't attach; just poll quietly until done (good for scripts)"
+        echo "  --collect  don't push/relaunch; reattach the existing job and pull"
+        echo "  --force    if a session for this meeting exists, kill and relaunch"
+        exit 0 ;;
+      -*) echo "earshot offload: unknown option: $1" >&2; exit 1 ;;
+      *)  DIR="$1"; shift ;;
+    esac
+  done
+
+  if [ -z "${DIR}" ] || [ ! -d "${DIR}" ]; then
+    echo "earshot offload: pass a meeting directory" >&2; exit 1
+  fi
+  if [ ! -f "${DIR}/far_remote.wav" ]; then
+    echo "earshot offload: ${DIR}/far_remote.wav not found" >&2; exit 1
+  fi
+  if [ -z "${HOST}" ]; then
+    echo "earshot offload: no Spark host. Set EARSHOT_SPARK_HOST in earshot.conf or pass --host" >&2
+    exit 1
+  fi
+  if [ "${DO_TX}" -eq 0 ] && [ "${DO_DZ}" -eq 0 ]; then DO_TX=1; fi
+
+  local NAME RDIR SESSION
+  NAME="$(basename "${DIR}")"
+  RDIR="${RROOT%/}/${NAME}"
+  SESSION="earshot-${NAME}"
+
+  local rsh="ssh ${SSH_OPTS}"
+
+  if [ "${COLLECT}" -eq 0 ]; then
+    echo "earshot offload: ${DIR} -> ${HOST}:${RDIR} (device=${DEVICE}, tmux=${SESSION})"
+
+    # refuse to clobber a running session unless --force
+    local state
+    state="$(${rsh} "${HOST}" "tmux has-session -t ${SESSION} 2>/dev/null && echo yes || echo no")"
+    if [ "${state}" = "yes" ]; then
+      if [ "${FORCE}" -eq 1 ]; then
+        ${rsh} "${HOST}" "tmux kill-session -t ${SESSION} 2>/dev/null || true"
+      else
+        echo "earshot offload: session ${SESSION} already exists on ${HOST}." >&2
+        echo "  Reattach:  earshot offload '${DIR}' --watch --collect" >&2
+        echo "  Collect:   earshot offload '${DIR}' --collect" >&2
+        echo "  Restart:   earshot offload '${DIR}' --force ..." >&2
+        exit 1
+      fi
+    fi
+
+    # push inputs
+    ${rsh} "${HOST}" "mkdir -p '${RDIR}'"
+    local pushlist=() f
+    for f in far_remote.wav near_me.wav meeting.json transcript.json; do
+      [ -f "${DIR}/${f}" ] && pushlist+=("${DIR}/${f}")
+    done
+    echo "earshot offload: pushing audio..."
+    rsync -a --info=progress2 -e "${rsh}" "${pushlist[@]}" "${HOST}:${RDIR}/"
+
+    # sync the right context's speaker library up (into the meeting dir) so remote
+    # diarize attributes names without mixing business/personal voiceprints.
+    local LIBLOCAL=""
+    if [ "${DO_DZ}" -eq 1 ]; then
+      local octx="${CTX}"
+      [ -z "${octx}" ] && octx="$(infer_context_from_dir "${DIR}")"
+      [ -z "${octx}" ] && octx="${EARSHOT_DEFAULT_CONTEXT:-}"
+      if [ -n "${octx}" ] && earshot_load_context "${octx}"; then
+        LIBLOCAL="${CONTEXT_SPEAKERS:-}"
+      fi
+      [ -z "${LIBLOCAL}" ] && LIBLOCAL="${EARSHOT_SPEAKERS:-${HOME}/.config/earshot/speakers.json}"
+      if [ -f "${LIBLOCAL}" ]; then
+        echo "earshot offload: speaker library '${LIBLOCAL}' (context ${octx:-none})"
+        rsync -a -e "${rsh}" "${LIBLOCAL}" "${HOST}:${RDIR}/speakers.json"
+      else
+        LIBLOCAL=""
+      fi
+    fi
+
+    # build the remote pipeline (run from inside RDIR; '.' is the meeting dir)
+    local parts="" tokenline="" speakersline=""
+    if [ "${DO_TX}" -eq 1 ]; then
+      parts="${RCMD} transcribe . --device ${DEVICE} ${TX_ARGS}"
+    fi
+    if [ "${DO_DZ}" -eq 1 ]; then
+      local dz="${RCMD} diarize . --device ${DEVICE} ${DZ_ARGS}"
+      if [ -n "${parts}" ]; then parts="${parts} && ${dz}"; else parts="${dz}"; fi
+      [ -n "${HF_TOKEN:-}" ] && tokenline="export HF_TOKEN='${HF_TOKEN}'"
+      # point remote diarize at the library we just pushed (cwd is RDIR)
+      [ -n "${LIBLOCAL}" ] && speakersline="export EARSHOT_SPEAKERS=speakers.json"
+    fi
+
+    # generate the runner: tee to run.log (so --watch shows live output) and
+    # record the pipeline's exit code in .status when finished.
+    local TMPRUN
+    TMPRUN="$(mktemp)"
+    cat > "${TMPRUN}" <<EOF
+#!/usr/bin/env bash
+cd "\$(dirname "\$0")" || exit 1
+rm -f .status
+${tokenline}
+${speakersline}
+( ${parts} ) 2>&1 | tee run.log
+echo "\${PIPESTATUS[0]}" > .status
+EOF
+    rsync -a -e "${rsh}" "${TMPRUN}" "${HOST}:${RDIR}/.run.sh"
+    rm -f "${TMPRUN}"
+
+    echo "earshot offload: launching remote job in tmux..."
+    ${rsh} "${HOST}" "tmux new-session -d -s ${SESSION} \"bash -l '${RDIR}/.run.sh'\""
+  else
+    echo "earshot offload: collecting from ${HOST}:${RDIR} (tmux=${SESSION})"
+  fi
+
+  # --- watch live (optional) -------------------------------------------------
+  if [ "${WATCH}" -eq 1 ]; then
+    echo "earshot offload: attaching via mosh (detach with Ctrl-b d; job keeps running)..."
+    ${MOSH} ${HOST} -- tmux attach -t "${SESSION}" || true
+  fi
+
+  # --- wait for completion ---------------------------------------------------
+  echo "earshot offload: waiting for job... (Ctrl-C is safe; remote job continues)"
+  local st
+  while true; do
+    st="$(${rsh} "${HOST}" "if [ -f '${RDIR}/.status' ]; then echo done; elif tmux has-session -t ${SESSION} 2>/dev/null; then echo running; else echo gone; fi")"
+    case "${st}" in
+      done) break ;;
+      gone)
+        if ${rsh} "${HOST}" "test -f '${RDIR}/.status'"; then break; fi
+        echo "earshot offload: tmux session ended without a status file; check ${HOST}:${RDIR}/run.log" >&2
+        exit 1 ;;
+      *) sleep "${POLL}" ;;
+    esac
+  done
+
+  local rc
+  rc="$(${rsh} "${HOST}" "cat '${RDIR}/.status' 2>/dev/null" || echo 1)"
+  if [ "${rc}" != "0" ]; then
+    echo "earshot offload: remote job failed (exit ${rc}). Last log lines:" >&2
+    ${rsh} "${HOST}" "tail -n 15 '${RDIR}/run.log' 2>/dev/null" >&2 || true
+    exit 1
+  fi
+
+  # --- pull results ----------------------------------------------------------
+  echo "earshot offload: pulling results..."
+  rsync -a -e "${rsh}" \
+    "${HOST}:${RDIR}/transcript.json" "${HOST}:${RDIR}/transcript.md" "${DIR}/" \
+    2>/dev/null || true
+
+  if [ "${RM_REMOTE}" -eq 1 ]; then
+    ${rsh} "${HOST}" "tmux kill-session -t ${SESSION} 2>/dev/null; rm -rf '${RDIR}'"
+    echo "earshot offload: removed remote ${RDIR}"
+  fi
+
+  echo "earshot offload: done -> ${DIR}/transcript.md"
+}
+
+# ===========================================================================
+# Capture
+# ===========================================================================
+cmd_record() {
+  load_config
+
+  local PROFILE="${EARSHOT_DEFAULT_PROFILE:-obsbot}"
+  local CONTEXT="${EARSHOT_DEFAULT_CONTEXT:-}"
+  local OUT_OVERRIDE=""
+  local RATE="${EARSHOT_SAMPLE_RATE:-48000}"
+  local BLACKHOLE_NAME="${EARSHOT_BLACKHOLE_NAME:-BlackHole 2ch}"
+  local AUTOSTOP="${EARSHOT_AUTOSTOP_SILENCE:-180}"
+  local SILENCE_DB="${EARSHOT_SILENCE_DB:--50dB}"
+  local MAX_MIN="${EARSHOT_MAX_MINUTES:-0}"
+  local TITLE=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -p|--profile)   PROFILE="$2"; shift 2 ;;
+      -c|--context)   CONTEXT="$2"; shift 2 ;;
+      -t|--title)     TITLE="$2";   shift 2 ;;
+      -o|--out)       OUT_OVERRIDE="$2"; shift 2 ;;
+      -r|--rate)      RATE="$2";    shift 2 ;;
+      --auto-stop)    AUTOSTOP="$2"; shift 2 ;;
+      --no-auto-stop) AUTOSTOP=0;   shift ;;
+      --max-min)      MAX_MIN="$2"; shift 2 ;;
+      -h|--help)      usage; exit 0 ;;
+      *) echo "earshot rec: unknown argument: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  # resolve output root: explicit -o wins; else context; else base.
+  local OUT_ROOT
+  if [ -n "${OUT_OVERRIDE}" ]; then
+    OUT_ROOT="${OUT_OVERRIDE}"
+  elif [ -n "${CONTEXT}" ]; then
+    if ! earshot_load_context "${CONTEXT}"; then
+      echo "earshot: unknown context '${CONTEXT}' (check earshot.conf)" >&2
+      exit 1
+    fi
+    OUT_ROOT="${CONTEXT_OUT}"
+  else
+    OUT_ROOT="${EARSHOT_OUT_ROOT:-${HOME}/Notes/meetings}"
+  fi
+
+  # prompt for a title when one was not given (skip with empty input)
+  if [ -z "${TITLE}" ] && [ -r /dev/tty ]; then
+    printf 'Meeting title (Enter to skip): ' > /dev/tty
+    IFS= read -r TITLE < /dev/tty || TITLE=""
+  fi
+
+  if ! earshot_load_profile "${PROFILE}"; then
+    echo "earshot: unknown profile '${PROFILE}' (check earshot.conf)" >&2
+    exit 1
+  fi
+
+  local FAR_IDX NEAR_IDX
+  FAR_IDX="$(av_resolve "${BLACKHOLE_NAME}" || true)"
+  if [ -z "${FAR_IDX}" ]; then
+    echo "earshot: call-audio device '${BLACKHOLE_NAME}' is not present." >&2
+    av_print_list >&2
+    exit 1
+  fi
+  NEAR_IDX="$(av_resolve "${MIC_NAME}" || true)"
+  if [ -z "${NEAR_IDX}" ]; then
+    echo "earshot: mic device '${MIC_NAME}' (profile '${PROFILE}') is not present." >&2
+    av_print_list >&2
+    exit 1
+  fi
+
+  local STAMP SLUG MEET_DIR
+  STAMP="$(date +%Y-%m-%d_%H%M%S)"
+  SLUG=""
+  if [ -n "${TITLE}" ]; then
+    SLUG="$(printf '%s' "${TITLE}" \
+      | tr '[:upper:]' '[:lower:]' \
+      | tr ' ' '-' \
+      | tr -cd 'a-z0-9-_')"
+  fi
+  if [ -n "${SLUG}" ]; then
+    MEET_DIR="${OUT_ROOT}/${STAMP}_${SLUG}"
+  else
+    MEET_DIR="${OUT_ROOT}/${STAMP}"
+  fi
+  mkdir -p "${MEET_DIR}"
+
+  local FAR="${MEET_DIR}/far_remote.wav"
+  local NEAR="${MEET_DIR}/near_me.wav"
+  local MON="${MEET_DIR}/monitor_stereo.wav"
+  local FAR_LOG="${MEET_DIR}/.far.log"
+  local NEAR_LOG="${MEET_DIR}/.near.log"
+
+  echo "earshot: context=${CONTEXT:-none} profile=${PROFILE} rate=${RATE}"
+  echo "earshot: far  '${BLACKHOLE_NAME}' (index ${FAR_IDX}) -> far_remote.wav"
+  echo "earshot: near '${MIC_NAME}' (index ${NEAR_IDX}) -> near_me.wav"
+  echo "earshot: writing to ${MEET_DIR}"
+
+  local START_TS END_TS
+  START_TS="$(date +%Y-%m-%dT%H:%M:%S%z)"
+
+  # stdin from /dev/null so neither ffmpeg fights for the terminal; we stop them
+  # with SIGINT, which ffmpeg handles by finalizing the output cleanly.
+  # When auto-stop is on, silencedetect on the call channel logs a "silence_start"
+  # line once the call has been silent for AUTOSTOP seconds (a passthrough filter,
+  # so far_remote.wav is unchanged).
+  local far_af=""
+  if [ "${AUTOSTOP}" -gt 0 ] 2>/dev/null; then
+    far_af="-af silencedetect=noise=${SILENCE_DB}:d=${AUTOSTOP}"
+  fi
+  # shellcheck disable=SC2086
+  ffmpeg -hide_banner -nostdin -f avfoundation -i ":${FAR_IDX}" \
+    ${far_af} -c:a pcm_s16le -ar "${RATE}" "${FAR}" </dev/null >"${FAR_LOG}" 2>&1 &
+  local FAR_PID=$!
+  ffmpeg -hide_banner -nostdin -f avfoundation -i ":${NEAR_IDX}" \
+    -c:a pcm_s16le -ar "${RATE}" "${NEAR}" </dev/null >"${NEAR_LOG}" 2>&1 &
+  local NEAR_PID=$!
+
+  stop_recording() {
+    kill -INT "${FAR_PID}" "${NEAR_PID}" 2>/dev/null || true
+  }
+  trap 'stop_recording' INT TERM
+
+  echo "earshot: recording... press Enter to stop (or Ctrl-C)."
+  if [ "${AUTOSTOP}" -gt 0 ] 2>/dev/null; then
+    echo "earshot: will auto-stop after ${AUTOSTOP}s of call-audio silence (--no-auto-stop to disable)."
+  fi
+  [ "${MAX_MIN}" -gt 0 ] 2>/dev/null && echo "earshot: hard cap ${MAX_MIN} min."
+
+  # Watch loop: stop on Enter, on sustained call silence, on max duration, or if
+  # ffmpeg dies. Ctrl-C/TERM still works via the trap.
+  local t0=$SECONDS stop_reason="ended"
+  while kill -0 "${FAR_PID}" 2>/dev/null && kill -0 "${NEAR_PID}" 2>/dev/null; do
+    if [ -r /dev/tty ]; then
+      if read -t 2 -r _ </dev/tty; then stop_reason="manual"; break; fi
+    else
+      sleep 2
+    fi
+    # Stop only if we are CURRENTLY in a sustained silence: more silence_start
+    # than silence_end means the latest silence (>= AUTOSTOP secs) has not ended.
+    if [ "${AUTOSTOP}" -gt 0 ] 2>/dev/null; then
+      local ss se
+      ss="$(grep -c "silence_start" "${FAR_LOG}" 2>/dev/null)" || ss=0
+      se="$(grep -c "silence_end" "${FAR_LOG}" 2>/dev/null)" || se=0
+      if [ "${ss:-0}" -gt "${se:-0}" ]; then stop_reason="silence"; break; fi
+    fi
+    if [ "${MAX_MIN}" -gt 0 ] 2>/dev/null && [ "$(( SECONDS - t0 ))" -ge "$(( MAX_MIN * 60 ))" ]; then
+      stop_reason="max-duration"; break
+    fi
+  done
+  echo "earshot: stopping (${stop_reason})."
+
+  stop_recording
+  wait "${FAR_PID}" 2>/dev/null || true
+  wait "${NEAR_PID}" 2>/dev/null || true
+  trap - INT TERM
+
+  END_TS="$(date +%Y-%m-%dT%H:%M:%S%z)"
+
+  local fail=0
+  if [ ! -s "${FAR}" ]; then
+    echo "earshot: WARNING far_remote.wav is empty. Tail of capture log:" >&2
+    tail -n 5 "${FAR_LOG}" >&2 || true
+    fail=1
+  fi
+  if [ ! -s "${NEAR}" ]; then
+    echo "earshot: WARNING near_me.wav is empty (mic may be held exclusively by the meeting app). Tail of capture log:" >&2
+    tail -n 5 "${NEAR_LOG}" >&2 || true
+    fail=1
+  fi
+
+  # -ac 1 downmixes each input regardless of its native channel count.
+  if [ -s "${FAR}" ] && [ -s "${NEAR}" ]; then
+    echo "earshot: building monitor_stereo.wav..."
+    local FAR_MONO="${MEET_DIR}/.far_mono.wav"
+    local NEAR_MONO="${MEET_DIR}/.near_mono.wav"
+    ffmpeg -hide_banner -y -i "${FAR}"  -ac 1 "${FAR_MONO}"  >/dev/null 2>&1
+    ffmpeg -hide_banner -y -i "${NEAR}" -ac 1 "${NEAR_MONO}" >/dev/null 2>&1
+    ffmpeg -hide_banner -y -i "${FAR_MONO}" -i "${NEAR_MONO}" \
+      -filter_complex "[0:a][1:a]join=inputs=2:channel_layout=stereo[a]" \
+      -map "[a]" -c:a pcm_s16le "${MON}" >/dev/null 2>&1
+    rm -f "${FAR_MONO}" "${NEAR_MONO}"
+  fi
+
+  local FAR_CH NEAR_CH
+  FAR_CH="$(ffprobe -v error -show_entries stream=channels -of default=nw=1:nk=1 "${FAR}" 2>/dev/null || echo "?")"
+  NEAR_CH="$(ffprobe -v error -show_entries stream=channels -of default=nw=1:nk=1 "${NEAR}" 2>/dev/null || echo "?")"
+  cat > "${MEET_DIR}/meeting.json" <<EOF
+{
+  "title": $(printf '%s' "${TITLE:-}" | sed 's/"/\\"/g; s/^/"/; s/$/"/'),
+  "profile": "${PROFILE}",
+  "far_device": "${BLACKHOLE_NAME}",
+  "near_device": "${MIC_NAME}",
+  "sample_rate": ${RATE},
+  "far_channels": "${FAR_CH}",
+  "near_channels": "${NEAR_CH}",
+  "started_at": "${START_TS}",
+  "ended_at": "${END_TS}",
+  "files": {
+    "far_remote": "far_remote.wav",
+    "near_me": "near_me.wav",
+    "monitor_stereo": "monitor_stereo.wav"
+  }
+}
+EOF
+
+  rm -f "${FAR_LOG}" "${NEAR_LOG}"
+
+  if [ "${fail}" -eq 1 ]; then
+    echo "earshot: finished WITH WARNINGS -> ${MEET_DIR}" >&2
+    exit 1
+  fi
+
+  echo "earshot: done."
+  echo "  far_remote.wav     (the call, everyone but you)"
+  echo "  near_me.wav        (your mic)"
+  echo "  monitor_stereo.wav (L=remote, R=you) for a quick listen"
+  echo "  -> ${MEET_DIR}"
+}
+
+# ===========================================================================
+# Dispatch
+# ===========================================================================
+case "${1:-}" in
+  rec|record)     shift; cmd_record "$@" ;;
+  devices)        cmd_devices ;;
+  transcribe|tx)  shift; cmd_transcribe "$@" ;;
+  diarize|dz)     shift; cmd_diarize "$@" ;;
+  enroll)         shift; run_speakers enroll "$@" ;;
+  speakers|spk)   shift; run_speakers "$@" ;;
+  offload)        shift; cmd_offload "$@" ;;
+  -h|--help|help) usage ;;
+  "")             usage; exit 1 ;;
+  *) echo "earshot: unknown subcommand: $1" >&2; echo "Run 'earshot help' for usage." >&2; exit 1 ;;
+esac

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Audio + meeting artifacts should never live in the repo
+*.wav
+*.flac
+*.m4a
+raw_capture.wav
+*_test.wav
+
+# Local speaker libraries and personal config live under ~/.config, keep them out
+speakers*.json
+earshot.local.conf
+
+# Editor / scratch
+*.swp
+*~
+.idea/
+.vscode/
+
+# Personal kickoff notes (contain homelab/network details); un-ignore if you want it tracked
+local-notetaker-kickoff-prompt.md

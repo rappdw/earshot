@@ -1,11 +1,11 @@
 # earshot
 
-A fully local meeting capture, transcription, and diarization pipeline for macOS.
+A fully local meeting capture, transcription, diarization, and notes pipeline for macOS.
 
 earshot records your meetings, transcribes them with Whisper, figures out who
-said what, and learns to attribute real names to the people you meet with
-regularly. It exists to replace cloud notetakers (Granola, Circleback, and the
-like) for meetings you would rather not send to a third party.
+said what, learns to attribute real names to the people you meet with regularly,
+and writes structured notes. It exists to replace cloud notetakers (Granola,
+Circleback, and the like) for meetings you would rather not send to a third party.
 
 **The hard rule: audio and transcripts never leave your hardware.** Everything
 runs on your Mac, or optionally on your own GPU box over your own network. The
@@ -38,10 +38,13 @@ your mic ───────────────────────�
                        identify (voice library) ─► real names
                                  │
                   transcript.json  +  transcript.md
+                                 │
+                       summarize (Ollama, local)  ─► notes.md
 ```
 
 Transcription and diarization run on the Mac by default, or can be offloaded to
-a CUDA box (e.g. a DGX Spark) over SSH.
+a CUDA box (e.g. a DGX Spark) over SSH. Summarization runs against a local Ollama
+model by default; a hosted Claude model is available as an explicit opt-in.
 
 ## Requirements
 
@@ -51,6 +54,8 @@ a CUDA box (e.g. a DGX Spark) over SSH.
 - Python 3.9+ for transcription/diarization.
 - For diarization + speaker ID: a free [Hugging Face](https://huggingface.co/)
   token and acceptance of two gated (free) model licenses, see below.
+- For summarization: a local [Ollama](https://ollama.com/) install with a model
+  pulled (e.g. `ollama pull llama3.1`). Optional; only needed for `summarize`.
 - Optional: a CUDA host with SSH access for offload.
 
 ## Install
@@ -97,6 +102,7 @@ earshot rec                           # record (prompts for a title)
 earshot rec -c personal -t "Mom"      # personal context, titled
 earshot transcribe DIR                # faster-whisper -> transcript.json + .md
 earshot diarize DIR                   # split REMOTE into speakers, attribute names
+earshot summarize DIR                 # write notes.md (local Ollama by default)
 earshot enroll Dan --from DIR --speaker REMOTE-1   # teach a voice from a meeting
 earshot speakers list                 # who's enrolled
 earshot offload DIR --diarize         # run it all on the Spark over SSH
@@ -136,6 +142,22 @@ earshot rec -c personal     # -> EARSHOT_OUT_ROOT_PERSONAL
 `diarize`, `enroll`, and `speakers` pick the right library by `-c`, by inferring
 it from the meeting's path, or by the default context.
 
+### Summarization
+
+`earshot summarize DIR` turns the transcript into `notes.md` with Summary,
+Decisions, Action Items, Open Questions, and Notable Details.
+
+```bash
+earshot summarize DIR                      # local Ollama (default), nothing leaves the box
+earshot summarize DIR --model qwen2.5:14b  # any model you have pulled
+earshot summarize DIR --backend claude     # opt-in; sends the transcript to Anthropic
+```
+
+The `ollama` backend is fully local; point `EARSHOT_OLLAMA_MODEL` at any model
+you've `ollama pull`ed. The `claude` backend is the one step that sends text
+off-box: it's off by default, prints a loud warning, and needs `ANTHROPIC_API_KEY`.
+Don't use it for sensitive meetings.
+
 ### Offload to a GPU box
 
 `earshot offload DIR` ships the audio to a CUDA host over SSH + rsync, runs the
@@ -170,6 +192,7 @@ Spark offload host.
   meeting.json          capture metadata
   transcript.json       segments, timestamps, speakers, embeddings
   transcript.md         readable transcript
+  notes.md              structured meeting notes (after summarize)
 ```
 
 ## Honest limitations
@@ -188,8 +211,6 @@ Spark offload host.
 
 ## Roadmap
 
-- Summarization (decisions / action items / open questions) into structured
-  notes, local LLM by default with an explicit opt-in to a hosted model.
 - Convenience: auto-detect call start, hotkey trigger, calendar-based titling.
 
 ## License

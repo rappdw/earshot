@@ -65,7 +65,7 @@ RUN if [ "${CT2_CUDA}" = "1" ]; then \
 RUN python -c "import torch; print('torch=='+torch.__version__)" > /tmp/constraints.txt && \
     (python -c "import ctranslate2; print('ctranslate2=='+ctranslate2.__version__)" >> /tmp/constraints.txt || true) && \
     pip install --no-cache-dir -c /tmp/constraints.txt \
-      "faster-whisper>=1.0.3" "pyannote.audio>=3.1" && \
+      "huggingface_hub<1.0" "faster-whisper>=1.0.3" "pyannote.audio>=3.1" && \
     TMINOR="$(python -c 'import torch; v=torch.__version__.split("+")[0].split("."); print(v[0]+"."+v[1])')" && \
     echo "force-installing CPU torchaudio==${TMINOR}.* (no-deps) over the CUDA-13 wheel" && \
     pip install --no-cache-dir --no-deps --force-reinstall \

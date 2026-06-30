@@ -51,19 +51,18 @@ RUN if [ "${CT2_CUDA}" = "1" ]; then \
 # --- earshot Python deps ----------------------------------------------------
 # Pin torch (and the source-built ctranslate2, if present) so installing
 # faster-whisper / pyannote can't replace them with CPU wheels from PyPI.
-# pyannote needs torchaudio. PyPI's default torchaudio (aarch64) is a newer
-# CUDA-13 build that mismatches the base's CUDA-12 torch and fails at runtime
-# with "libcudart.so.13: cannot open shared object file". Install a CPU
-# torchaudio matching the base torch's minor version instead: it has no CUDA
-# runtime dependency (so it always imports), and pyannote still runs its models
-# on the GPU via torch. Then pin torch + this torchaudio + the source-built
-# ctranslate2 so installing faster-whisper / pyannote can't swap any of them.
-RUN TMINOR="$(python -c 'import torch; v=torch.__version__.split("+")[0].split("."); print(v[0]+"."+v[1])')" && \
-    echo "installing CPU torchaudio==${TMINOR}.* to match base torch" && \
-    pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torchaudio==${TMINOR}.*" && \
-    python -c "import torch; print('torch=='+torch.__version__)"  > /tmp/constraints.txt && \
-    python -c "import torchaudio; print('torchaudio=='+torchaudio.__version__)" >> /tmp/constraints.txt && \
-    (python -c "import ctranslate2; print('ctranslate2=='+ctranslate2.__version__)" >> /tmp/constraints.txt || true) && \
+# pyannote pulls torchaudio. Off-the-shelf torchaudio wheels hard-pin an exact
+# torch (e.g. torch==2.8.0), which conflicts with the NGC dev torch
+# (2.8.0a0+...nv), and the PyPI aarch64 wheel is a CUDA-13 build that mismatches
+# the CUDA-12 base (-> "libcudart.so.13 not found"). The only torchaudio that
+# fits the NGC torch is the one already in the base image. So pin torch +
+# torchaudio (+ the source-built ctranslate2) to the installed versions and let
+# pip keep them. importlib.metadata reads versions without importing the native
+# libs; `cat` echoes the pins into the build log for debugging.
+RUN python -c "import importlib.metadata as m; print('torch=='+m.version('torch'))" > /tmp/constraints.txt && \
+    python -c "import importlib.metadata as m; print('torchaudio=='+m.version('torchaudio'))" >> /tmp/constraints.txt && \
+    (python -c "import importlib.metadata as m; print('ctranslate2=='+m.version('ctranslate2'))" >> /tmp/constraints.txt || true) && \
+    cat /tmp/constraints.txt && \
     pip install --no-cache-dir -c /tmp/constraints.txt \
       "faster-whisper>=1.0.3" "pyannote.audio>=3.1"
 

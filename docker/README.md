@@ -18,7 +18,22 @@ the clean place to add a CUDA build of CTranslate2 later.
 `earshot offload` defaults to `--device auto`, so each step lands on the right
 device without any flag.
 
-## One-time setup on the Spark
+## Quick setup on the Spark
+
+After cloning the repo on the Spark, one command builds the image, fixes the
+wrapper perms, and verifies CUDA:
+
+```bash
+cd ~/earshot
+./docker/install-dgx.sh                                   # uses the default NGC base tag
+./docker/install-dgx.sh --base nvcr.io/nvidia/pytorch:25.06-py3   # or pin a tag
+```
+
+It prints the exact `EARSHOT_SPARK_EARSHOT` line to set on the Mac when it's
+done. The manual steps below are the same thing, broken out, if you'd rather run
+them yourself or the script hits something specific to your box.
+
+## One-time setup on the Spark (manual)
 
 1. **Prerequisites** (DGX OS ships these; verify):
    - Docker (or Podman) and the NVIDIA Container Toolkit, so `--gpus all` works:

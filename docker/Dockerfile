@@ -51,11 +51,18 @@ RUN if [ "${CT2_CUDA}" = "1" ]; then \
 # --- earshot Python deps ----------------------------------------------------
 # Pin torch (and the source-built ctranslate2, if present) so installing
 # faster-whisper / pyannote can't replace them with CPU wheels from PyPI.
-# Pin torch AND torchaudio (pyannote pulls torchaudio; an unpinned PyPI wheel can
-# link a different CUDA and fail at runtime with libcudart.so.NN not found), plus
-# the source-built ctranslate2 if present.
-RUN python -c "import torch; print('torch=='+torch.__version__)" > /tmp/constraints.txt && \
-    (python -c "import torchaudio; print('torchaudio=='+torchaudio.__version__)" >> /tmp/constraints.txt || true) && \
+# pyannote needs torchaudio. PyPI's default torchaudio (aarch64) is a newer
+# CUDA-13 build that mismatches the base's CUDA-12 torch and fails at runtime
+# with "libcudart.so.13: cannot open shared object file". Install a CPU
+# torchaudio matching the base torch's minor version instead: it has no CUDA
+# runtime dependency (so it always imports), and pyannote still runs its models
+# on the GPU via torch. Then pin torch + this torchaudio + the source-built
+# ctranslate2 so installing faster-whisper / pyannote can't swap any of them.
+RUN TMINOR="$(python -c 'import torch; v=torch.__version__.split("+")[0].split("."); print(v[0]+"."+v[1])')" && \
+    echo "installing CPU torchaudio==${TMINOR}.* to match base torch" && \
+    pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torchaudio==${TMINOR}.*" && \
+    python -c "import torch; print('torch=='+torch.__version__)"  > /tmp/constraints.txt && \
+    python -c "import torchaudio; print('torchaudio=='+torchaudio.__version__)" >> /tmp/constraints.txt && \
     (python -c "import ctranslate2; print('ctranslate2=='+ctranslate2.__version__)" >> /tmp/constraints.txt || true) && \
     pip install --no-cache-dir -c /tmp/constraints.txt \
       "faster-whisper>=1.0.3" "pyannote.audio>=3.1"

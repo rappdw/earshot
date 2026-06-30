@@ -10,10 +10,14 @@ the clean place to add a CUDA build of CTranslate2 later.
 
 ## What runs on GPU
 
+Both, by default:
+
 - **Diarization (pyannote)** → GPU, via the base image's CUDA torch.
-- **Transcription (faster-whisper)** → CPU. `ctranslate2`'s aarch64 wheel is
-  CPU-only; the Spark's 20-core CPU handles it fine. To move it to the GPU you'd
-  build CTranslate2 from source with CUDA (see the bottom of this file).
+- **Transcription (faster-whisper)** → GPU, via a **CUDA build of CTranslate2**
+  compiled from source in the image (PyPI ships no CUDA `ctranslate2` for
+  aarch64). `install-dgx.sh` auto-detects your GPU's compute capability and
+  passes it to the build. Pass `--no-ct2-cuda` to skip the (long) source build
+  and transcribe on CPU instead.
 
 `earshot offload` defaults to `--device auto`, so each step lands on the right
 device without any flag.
@@ -52,13 +56,18 @@ them yourself or the script hits something specific to your box.
    ```
 
 3. **Build the image.** Pick the NGC PyTorch tag NVIDIA recommends for your DGX
-   OS / driver and pass it as `BASE`. Build from the repo root so the Dockerfile
-   can copy `python/`:
+   OS / driver (`BASE`) and set `CUDA_ARCH` to your GPU's compute capability with
+   no dot (`nvidia-smi --query-gpu=compute_cap --format=csv,noheader` → `12.1` →
+   `121`). Build from the repo root so the Dockerfile can copy `python/`:
    ```bash
    docker build -f docker/Dockerfile \
      --build-arg BASE=nvcr.io/nvidia/pytorch:25.06-py3 \
+     --build-arg CUDA_ARCH=121 \
      -t earshot:latest .
    ```
+   This compiles CUDA CTranslate2 from source (tens of minutes). Add
+   `--build-arg CT2_CUDA=0` for the fast CPU-transcription image instead.
+   `install-dgx.sh` does all of this (and auto-detects `CUDA_ARCH`) for you.
 
 4. **Make the wrapper executable:**
    ```bash
@@ -114,18 +123,23 @@ outputs are written back to it owned by you, and models are cached in
 `~/.cache/earshot`. Knobs: `EARSHOT_IMAGE`, `EARSHOT_CONTAINER_RUNTIME`
 (docker|podman), `EARSHOT_CACHE_DIR`.
 
-## Optional: GPU transcription (CUDA CTranslate2)
+## GPU transcription internals & troubleshooting
 
-The stock image transcribes on CPU because there's no prebuilt CUDA `ctranslate2`
-for aarch64. To move transcription onto the GPU, extend the Dockerfile to build
-CTranslate2 from source with CUDA against the base image's toolkit:
+The image builds `libctranslate2` + its Python bindings from source with
+`-DWITH_CUDA=ON -DWITH_CUDNN=ON` against the base image's CUDA toolkit, pinned to
+your GPU's `CMAKE_CUDA_ARCHITECTURES`. `torch` (and the built `ctranslate2`) are
+version-pinned before installing faster-whisper/pyannote so PyPI can't swap in a
+CPU wheel.
 
-- clone `OpenNMT/CTranslate2`, `cmake -DWITH_CUDA=ON -DWITH_CUDNN=ON` with the
-  right `CMAKE_CUDA_ARCHITECTURES` for the Spark's GPU (check `nvidia-smi`), build,
-  then `pip install` the `python/` bindings against the built library.
-- rebuild the image and run offload with `--device cuda`.
+If the post-build check shows **transcription will use CPU** even though you ran
+the CUDA build:
 
-This is involved and the CUDA-arch support must match Blackwell; do it only if
-CPU transcription on the Spark is too slow for you. If you want, the alternative
-is adding a `whisper.cpp` CUDA backend to earshot, which builds on ARM far more
-easily — open an issue / ask.
+- The `CUDA_ARCH` likely doesn't match the GPU. Re-run with the exact value from
+  `nvidia-smi --query-gpu=compute_cap --format=csv,noheader` (drop the dot).
+- The `CTranslate2` tag may predate your CUDA toolkit / Blackwell. Try a newer
+  one: `./docker/install-dgx.sh --ct2-version vX.Y.Z`.
+
+If the source build is more trouble than it's worth on your setup, run
+`./docker/install-dgx.sh --no-ct2-cuda` for CPU transcription (diarization still
+uses the GPU). A `whisper.cpp` CUDA backend (easier to build on ARM) is a
+possible future alternative — ask if you want it.

@@ -233,6 +233,7 @@ cmd_devices() {
 cmd_summarize() {
   load_config
   export EARSHOT_SUMMARY_BACKEND EARSHOT_OLLAMA_URL EARSHOT_OLLAMA_MODEL \
+         EARSHOT_OPENAI_URL EARSHOT_OPENAI_MODEL EARSHOT_OPENAI_API_KEY \
          EARSHOT_CLAUDE_MODEL EARSHOT_SUMMARY_MAX_TOKENS
   local venv="${EARSHOT_VENV:-${HOME}/.local/share/earshot/venv}"
   local py="${venv}/bin/python"

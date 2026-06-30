@@ -96,31 +96,42 @@ earshot offload ~/Notes/meetings/business/SOMEDIR --no-watch       # no live mos
 earshot offload ~/Notes/meetings/business/SOMEDIR --diarize --rm-remote
 ```
 
-## Offloading summarization too (Ollama on the Spark)
+## Offloading summarization too
 
-`--summarize` adds a notes step that runs in the container against an **Ollama
-server on the Spark host** — so the Spark's GPU runs the summary LLM as well.
+`--summarize` adds a notes step that runs in the container against an inference
+server **on the Spark host**, so the host GPU produces the notes as well.
+`notes.md` is pulled back alongside the transcript. The summarize step runs with
+`--network host`, so the container reaches a host server at `localhost`.
 
-One-time on the Spark:
+### Using your existing vLLM server (recommended if you run vLLM)
+
+vLLM exposes an OpenAI-compatible API, so earshot can just call it — no second
+inference engine, no extra model loaded into GPU memory. Point the backend at it
+and name the model vLLM is serving:
+
 ```bash
-# install Ollama (https://ollama.com/download/linux), then pull a model:
-ollama pull llama3.1
-# verify it's serving (default 127.0.0.1:11434):
-curl -s localhost:11434/api/tags >/dev/null && echo ok
+earshot offload DIR --diarize --summarize \
+  --sum-args "--backend vllm --model <model-vllm-serves>"
 ```
 
-Then the full pipeline in one command:
+Defaults to `http://localhost:8000/v1`; override with
+`--sum-args "--backend vllm --model X --openai-url http://localhost:PORT/v1"`.
+If your vLLM requires an API key, set `OPENAI_API_KEY` on the Mac (it's
+forwarded). Anything else speaking the OpenAI chat API works the same way.
+
+### Or Ollama on the host
+
 ```bash
-earshot offload ~/Notes/meetings/business/SOMEDIR --diarize --summarize
-earshot offload DIR --diarize --summarize --sum-args "--model qwen2.5:14b"   # pick the Ollama model
+ollama pull llama3.1        # on the Spark
+earshot offload DIR --diarize --summarize                                # ollama, llama3.1
+earshot offload DIR --diarize --summarize --sum-args "--model qwen2.5:14b"
 ```
 
-`notes.md` is generated on the Spark and pulled back alongside the transcript.
-The summarize step runs the container with `--network host` so it reaches Ollama
-at `localhost:11434` (Ollama's default bind), and defaults to the `llama3.1`
-model — pull that one or pass `--sum-args "--model <name>"` for another. To use
-hosted Claude instead (sends text off-box), `--sum-args "--backend claude"`;
-offload forwards your `ANTHROPIC_API_KEY` for it.
+### Or hosted Claude (sends text off-box)
+
+```bash
+earshot offload DIR --diarize --summarize --sum-args "--backend claude"   # forwards ANTHROPIC_API_KEY
+```
 
 The first diarize run downloads the pyannote model into the cache (needs
 internet); it's persisted in `~/.cache/earshot` on the Spark and reused after.

@@ -95,6 +95,36 @@ def summarize_ollama(transcript, args):
     return msg
 
 
+def summarize_openai(transcript, args):
+    """OpenAI-compatible /v1/chat/completions backend. Works with vLLM (reuse an
+    existing server) and anything else speaking that API. Stays local if the URL
+    is local."""
+    base = args.openai_url.rstrip("/")
+    url = base + "/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    key = os.environ.get("EARSHOT_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    payload = {
+        "model": args.model,
+        "max_tokens": args.max_tokens,
+        "temperature": 0.2,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": transcript},
+        ],
+    }
+    print(f"earshot-summarize: {args.backend} model={args.model} url={url}", file=sys.stderr)
+    out = http_post_json(url, payload, headers, timeout=600)
+    choices = out.get("choices") or []
+    if not choices:
+        sys.exit(f"error: empty response from {url} (is model '{args.model}' served there?)")
+    text = ((choices[0].get("message") or {}).get("content") or "").strip()
+    if not text:
+        sys.exit(f"error: empty content from {url}")
+    return text
+
+
 def summarize_claude(transcript, args):
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -133,10 +163,14 @@ def main():
     ap.add_argument("meeting_dir", nargs="?", help="meeting folder with transcript.md/json")
     ap.add_argument("--transcript", help="override path to the transcript file")
     ap.add_argument("--backend", default=os.environ.get("EARSHOT_SUMMARY_BACKEND", "ollama"),
-                    choices=["ollama", "claude"], help="ollama (local, default) | claude (opt-in)")
+                    choices=["ollama", "vllm", "openai", "claude"],
+                    help="ollama (local default) | vllm/openai (OpenAI-compatible server) | claude (opt-in)")
     ap.add_argument("--model", help="override the model for the chosen backend")
     ap.add_argument("--ollama-url", dest="ollama_url",
                     default=os.environ.get("EARSHOT_OLLAMA_URL", "http://localhost:11434"))
+    ap.add_argument("--openai-url", dest="openai_url",
+                    default=os.environ.get("EARSHOT_OPENAI_URL", "http://localhost:8000/v1"),
+                    help="OpenAI-compatible base URL (vllm/openai backends), incl. /v1")
     ap.add_argument("--max-tokens", dest="max_tokens", type=int,
                     default=int(os.environ.get("EARSHOT_SUMMARY_MAX_TOKENS", "4096")))
     args = ap.parse_args()
@@ -148,6 +182,10 @@ def main():
     if not args.model:
         if args.backend == "claude":
             args.model = os.environ.get("EARSHOT_CLAUDE_MODEL", "claude-opus-4-8")
+        elif args.backend in ("vllm", "openai"):
+            args.model = os.environ.get("EARSHOT_OPENAI_MODEL", "")
+            if not args.model:
+                sys.exit("error: set the model your server serves via --model or EARSHOT_OPENAI_MODEL")
         else:
             args.model = os.environ.get("EARSHOT_OLLAMA_MODEL", "llama3.1")
 
@@ -155,6 +193,8 @@ def main():
 
     if args.backend == "claude":
         notes = summarize_claude(transcript, args)
+    elif args.backend in ("vllm", "openai"):
+        notes = summarize_openai(transcript, args)
     else:
         notes = summarize_ollama(transcript, args)
 

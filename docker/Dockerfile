@@ -57,6 +57,6 @@ RUN python -c "import torch; print('torch=='+torch.__version__)" > /tmp/constrai
       "faster-whisper>=1.0.3" "pyannote.audio>=3.1"
 
 # earshot's Python steps. diarize.py imports speakers.py, so both must be here.
-COPY python/transcribe.py python/diarize.py python/speakers.py /opt/earshot/
+COPY python/transcribe.py python/diarize.py python/speakers.py python/summarize.py /opt/earshot/
 
 WORKDIR /work

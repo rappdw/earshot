@@ -91,10 +91,36 @@ diarization model download).
 Exactly the same commands as before — they now execute in the container:
 
 ```bash
-earshot offload ~/Notes/meetings/business/SOMEDIR --diarize        # transcribe (CPU) + diarize (GPU)
+earshot offload ~/Notes/meetings/business/SOMEDIR --diarize        # transcribe + diarize (GPU)
 earshot offload ~/Notes/meetings/business/SOMEDIR --no-watch       # no live mosh attach
 earshot offload ~/Notes/meetings/business/SOMEDIR --diarize --rm-remote
 ```
+
+## Offloading summarization too (Ollama on the Spark)
+
+`--summarize` adds a notes step that runs in the container against an **Ollama
+server on the Spark host** — so the Spark's GPU runs the summary LLM as well.
+
+One-time on the Spark:
+```bash
+# install Ollama (https://ollama.com/download/linux), then pull a model:
+ollama pull llama3.1
+# verify it's serving (default 127.0.0.1:11434):
+curl -s localhost:11434/api/tags >/dev/null && echo ok
+```
+
+Then the full pipeline in one command:
+```bash
+earshot offload ~/Notes/meetings/business/SOMEDIR --diarize --summarize
+earshot offload DIR --diarize --summarize --sum-args "--model qwen2.5:14b"   # pick the Ollama model
+```
+
+`notes.md` is generated on the Spark and pulled back alongside the transcript.
+The summarize step runs the container with `--network host` so it reaches Ollama
+at `localhost:11434` (Ollama's default bind), and defaults to the `llama3.1`
+model — pull that one or pass `--sum-args "--model <name>"` for another. To use
+hosted Claude instead (sends text off-box), `--sum-args "--backend claude"`;
+offload forwards your `ANTHROPIC_API_KEY` for it.
 
 The first diarize run downloads the pyannote model into the cache (needs
 internet); it's persisted in `~/.cache/earshot` on the Spark and reused after.

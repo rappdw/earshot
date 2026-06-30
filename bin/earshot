@@ -263,8 +263,8 @@ cmd_offload() {
   local MOSH="${EARSHOT_MOSH:-mosh}"
   local POLL="${EARSHOT_POLL_SECS:-5}"
   local DEVICE="auto"   # each step picks its own device (cuda where available)
-  local DO_TX=0 DO_DZ=0 RM_REMOTE=0 WATCH=0 COLLECT=0 FORCE=0
-  local TX_ARGS="" DZ_ARGS="" DIR="" CTX=""
+  local DO_TX=0 DO_DZ=0 DO_SUM=0 RM_REMOTE=0 WATCH=0 COLLECT=0 FORCE=0
+  local TX_ARGS="" DZ_ARGS="" SUM_ARGS="" DIR="" CTX=""
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -275,6 +275,7 @@ cmd_offload() {
       -c|--context)  CTX="$2"; shift 2 ;;
       --transcribe)  DO_TX=1; shift ;;
       --diarize)     DO_DZ=1; shift ;;
+      --summarize)   DO_SUM=1; shift ;;
       --watch)       WATCH=1; shift ;;
       --no-watch)    WATCH=0; shift ;;
       --collect)     COLLECT=1; shift ;;
@@ -283,19 +284,21 @@ cmd_offload() {
       --poll)        POLL="$2"; shift 2 ;;
       --tx-args)     TX_ARGS="$2"; shift 2 ;;
       --dz-args)     DZ_ARGS="$2"; shift 2 ;;
+      --sum-args)    SUM_ARGS="$2"; shift 2 ;;
       -h|--help)
-        echo "usage: earshot offload DIR [--transcribe] [--diarize] [-c CONTEXT]"
-        echo "                          [--device auto] [--watch] [--collect]"
+        echo "usage: earshot offload DIR [--transcribe] [--diarize] [--summarize]"
+        echo "                          [-c CONTEXT] [--device auto] [--watch] [--collect]"
         echo "                          [--force] [--rm-remote] [--host H]"
         echo "                          [--remote-dir D] [--remote-cmd C]"
-        echo "                          [--tx-args \"...\"] [--dz-args \"...\"] [--poll N]"
+        echo "                          [--tx-args ...] [--dz-args ...] [--sum-args ...] [--poll N]"
         echo
-        echo "Remote work runs in a tmux session 'earshot-<dir>' so it survives a"
-        echo "disconnect. Default: launch, poll quietly until done, then pull results."
+        echo "Runs the chosen steps (default: transcribe) in a tmux session on the host,"
+        echo "polls quietly, then pulls transcript.json/.md and notes.md back."
         echo "Ctrl-C during the wait is safe (the job keeps running; --collect later)."
-        echo "  --watch    attach live via mosh+tmux; detach with Ctrl-b d"
-        echo "  --collect  don't push/relaunch; wait on the existing job and pull"
-        echo "  --force    if a session for this meeting exists, kill and relaunch"
+        echo "  --summarize  also write notes.md (needs Ollama on the host; see docker/README.md)"
+        echo "  --watch      attach live via mosh+tmux; detach with Ctrl-b d"
+        echo "  --collect    don't push/relaunch; wait on the existing job and pull"
+        echo "  --force      if a session for this meeting exists, kill and relaunch"
         exit 0 ;;
       -*) echo "earshot offload: unknown option: $1" >&2; exit 1 ;;
       *)  DIR="$1"; shift ;;
@@ -312,7 +315,7 @@ cmd_offload() {
     echo "earshot offload: no Spark host. Set EARSHOT_SPARK_HOST in earshot.conf or pass --host" >&2
     exit 1
   fi
-  if [ "${DO_TX}" -eq 0 ] && [ "${DO_DZ}" -eq 0 ]; then DO_TX=1; fi
+  if [ "${DO_TX}" -eq 0 ] && [ "${DO_DZ}" -eq 0 ] && [ "${DO_SUM}" -eq 0 ]; then DO_TX=1; fi
 
   local NAME RDIR SESSION
   NAME="$(basename "${DIR}")"
@@ -370,10 +373,12 @@ cmd_offload() {
     fi
 
     # build the remote pipeline (run from inside RDIR; '.' is the meeting dir)
-    local parts="" tokenline="" speakersline=""
+    local parts="" tokenline="" apikeyline="" speakersline=""
     # forward HF_TOKEN for both steps: transcribe downloads the Whisper model
     # from the HF Hub too, and warns / rate-limits without a token.
     [ -n "${HF_TOKEN:-}" ] && tokenline="export HF_TOKEN='${HF_TOKEN}'"
+    # forward ANTHROPIC_API_KEY in case summarize is run with --backend claude.
+    [ -n "${ANTHROPIC_API_KEY:-}" ] && apikeyline="export ANTHROPIC_API_KEY='${ANTHROPIC_API_KEY}'"
     if [ "${DO_TX}" -eq 1 ]; then
       parts="${RCMD} transcribe . --device ${DEVICE} ${TX_ARGS}"
     fi
@@ -382,6 +387,10 @@ cmd_offload() {
       if [ -n "${parts}" ]; then parts="${parts} && ${dz}"; else parts="${dz}"; fi
       # point remote diarize at the library we just pushed (cwd is RDIR)
       [ -n "${LIBLOCAL}" ] && speakersline="export EARSHOT_SPEAKERS=speakers.json"
+    fi
+    if [ "${DO_SUM}" -eq 1 ]; then
+      local sum="${RCMD} summarize . ${SUM_ARGS}"
+      if [ -n "${parts}" ]; then parts="${parts} && ${sum}"; else parts="${sum}"; fi
     fi
 
     # generate the runner: tee to run.log (so --watch shows live output) and
@@ -393,6 +402,7 @@ cmd_offload() {
 cd "\$(dirname "\$0")" || exit 1
 rm -f .status
 ${tokenline}
+${apikeyline}
 ${speakersline}
 ( ${parts} ) 2>&1 | tee run.log
 echo "\${PIPESTATUS[0]}" > .status
@@ -436,9 +446,11 @@ EOF
   fi
 
   # --- pull results ----------------------------------------------------------
+  # notes.md only exists when --summarize ran; rsync skips missing sources.
   echo "earshot offload: pulling results..."
   rsync -a -e "${rsh}" \
-    "${HOST}:${RDIR}/transcript.json" "${HOST}:${RDIR}/transcript.md" "${DIR}/" \
+    "${HOST}:${RDIR}/transcript.json" "${HOST}:${RDIR}/transcript.md" \
+    "${HOST}:${RDIR}/notes.md" "${DIR}/" \
     2>/dev/null || true
 
   if [ "${RM_REMOTE}" -eq 1 ]; then

@@ -167,6 +167,11 @@ fire-and-forget, `--collect` to reconnect to a still-running job. The host needs
 earshot installed (`--with-python --with-diarize`), a CUDA-matched torch, and
 `tmux` (+ `mosh-server` for `--watch`). Configure the host in `earshot.conf`.
 
+To run the remote steps in a **CUDA container** instead of a venv (reproducible
+GPU environment on NVIDIA's NGC base, no torch fiddling), see
+[`docker/README.md`](docker/README.md). It's a drop-in: build the image on the
+host and point `EARSHOT_SPARK_EARSHOT` at the `earshot-container` wrapper.
+
 ## Hugging Face setup (for diarization)
 
 1. Create a free token: https://huggingface.co/settings/tokens

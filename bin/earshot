@@ -262,7 +262,7 @@ cmd_offload() {
   local SSH_OPTS="${EARSHOT_SSH_OPTS:-}"
   local MOSH="${EARSHOT_MOSH:-mosh}"
   local POLL="${EARSHOT_POLL_SECS:-5}"
-  local DEVICE="cuda"
+  local DEVICE="auto"   # each step picks its own device (cuda where available)
   local DO_TX=0 DO_DZ=0 RM_REMOTE=0 WATCH=1 COLLECT=0 FORCE=0
   local TX_ARGS="" DZ_ARGS="" DIR="" CTX=""
 
@@ -285,7 +285,7 @@ cmd_offload() {
       --dz-args)     DZ_ARGS="$2"; shift 2 ;;
       -h|--help)
         echo "usage: earshot offload DIR [--transcribe] [--diarize] [-c CONTEXT]"
-        echo "                          [--device cuda] [--no-watch] [--collect]"
+        echo "                          [--device auto] [--no-watch] [--collect]"
         echo "                          [--force] [--rm-remote] [--host H]"
         echo "                          [--remote-dir D] [--remote-cmd C]"
         echo "                          [--tx-args \"...\"] [--dz-args \"...\"] [--poll N]"

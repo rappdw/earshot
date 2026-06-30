@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# earshot-container - run one earshot step inside the CUDA container.
+#
+# This is the *remote* command for `earshot offload`. Point the Mac's config at
+# it:  EARSHOT_SPARK_EARSHOT="~/earshot/docker/earshot-container"
+#
+# offload calls it as:  earshot-container transcribe . --device auto [...]
+#                       earshot-container diarize    . --device auto [...]
+# from inside the meeting's staging dir. We bind-mount that dir to /work so "."
+# and "speakers.json" resolve inside the container, run as the invoking user so
+# outputs aren't root-owned, and persist the model cache across runs.
+#
+# Env knobs (override as needed):
+#   EARSHOT_IMAGE              container image (default earshot:latest)
+#   EARSHOT_CONTAINER_RUNTIME  docker | podman (default docker)
+#   EARSHOT_CACHE_DIR          host dir for the model cache (default ~/.cache/earshot)
+#
+# HF_TOKEN and EARSHOT_SPEAKERS are forwarded from the offload job's environment.
+
+set -euo pipefail
+
+IMAGE="${EARSHOT_IMAGE:-earshot:latest}"
+RUNTIME="${EARSHOT_CONTAINER_RUNTIME:-docker}"
+CACHE_DIR="${EARSHOT_CACHE_DIR:-${HOME}/.cache/earshot}"
+
+cmd="${1:-}"
+[ "$#" -gt 0 ] && shift || true
+case "${cmd}" in
+  transcribe) script="transcribe.py" ;;
+  diarize)    script="diarize.py" ;;
+  *) echo "earshot-container: unsupported step '${cmd}' (expected transcribe|diarize)" >&2
+     exit 1 ;;
+esac
+
+mkdir -p "${CACHE_DIR}/huggingface" "${CACHE_DIR}/torch"
+
+exec "${RUNTIME}" run --rm --gpus all \
+  --user "$(id -u):$(id -g)" \
+  -e HF_TOKEN -e EARSHOT_SPEAKERS \
+  -e HF_HOME=/cache/huggingface \
+  -e TORCH_HOME=/cache/torch \
+  -e XDG_CACHE_HOME=/cache \
+  -e HOME=/cache \
+  -v "${PWD}":/work -w /work \
+  -v "${CACHE_DIR}":/cache \
+  "${IMAGE}" python "/opt/earshot/${script}" "$@"

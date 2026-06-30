@@ -51,20 +51,26 @@ RUN if [ "${CT2_CUDA}" = "1" ]; then \
 # --- earshot Python deps ----------------------------------------------------
 # Pin torch (and the source-built ctranslate2, if present) so installing
 # faster-whisper / pyannote can't replace them with CPU wheels from PyPI.
-# pyannote pulls torchaudio. Off-the-shelf torchaudio wheels hard-pin an exact
-# torch (e.g. torch==2.8.0), which conflicts with the NGC dev torch
-# (2.8.0a0+...nv), and the PyPI aarch64 wheel is a CUDA-13 build that mismatches
-# the CUDA-12 base (-> "libcudart.so.13 not found"). The only torchaudio that
-# fits the NGC torch is the one already in the base image. So pin torch +
-# torchaudio (+ the source-built ctranslate2) to the installed versions and let
-# pip keep them. importlib.metadata reads versions without importing the native
-# libs; `cat` echoes the pins into the build log for debugging.
-RUN python -c "import importlib.metadata as m; print('torch=='+m.version('torch'))" > /tmp/constraints.txt && \
-    python -c "import importlib.metadata as m; print('torchaudio=='+m.version('torchaudio'))" >> /tmp/constraints.txt && \
-    (python -c "import importlib.metadata as m; print('ctranslate2=='+m.version('ctranslate2'))" >> /tmp/constraints.txt || true) && \
-    cat /tmp/constraints.txt && \
+# pyannote needs torchaudio, but the NGC base doesn't ship one, and neither
+# off-the-shelf option works against the NGC dev torch (2.8.0a0+...nv): the PyPI
+# aarch64 wheel is CUDA-13 (-> "libcudart.so.13 not found" at runtime), and the
+# stable wheel hard-pins torch==2.8.0 (resolver conflict).
+#
+# So: install pyannote/faster-whisper first (pip pulls the CUDA-13 torchaudio,
+# but torch is pinned and stays the NGC build), THEN force-replace torchaudio
+# with the CPU wheel matching torch's minor, using --no-deps so its torch== pin
+# is ignored. The CPU torchaudio has no CUDA runtime dependency (always imports)
+# and pyannote still runs its models on the GPU via the NGC torch. The final
+# import is a build-time check that torchaudio loads.
+RUN python -c "import torch; print('torch=='+torch.__version__)" > /tmp/constraints.txt && \
+    (python -c "import ctranslate2; print('ctranslate2=='+ctranslate2.__version__)" >> /tmp/constraints.txt || true) && \
     pip install --no-cache-dir -c /tmp/constraints.txt \
-      "faster-whisper>=1.0.3" "pyannote.audio>=3.1"
+      "faster-whisper>=1.0.3" "pyannote.audio>=3.1" && \
+    TMINOR="$(python -c 'import torch; v=torch.__version__.split("+")[0].split("."); print(v[0]+"."+v[1])')" && \
+    echo "force-installing CPU torchaudio==${TMINOR}.* (no-deps) over the CUDA-13 wheel" && \
+    pip install --no-cache-dir --no-deps --force-reinstall \
+      --index-url https://download.pytorch.org/whl/cpu "torchaudio==${TMINOR}.*" && \
+    python -c "import torchaudio; print('torchaudio OK', torchaudio.__version__)"
 
 # earshot's Python steps. diarize.py imports speakers.py, so both must be here.
 COPY python/transcribe.py python/diarize.py python/speakers.py python/summarize.py /opt/earshot/

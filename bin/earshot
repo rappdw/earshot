@@ -371,13 +371,15 @@ cmd_offload() {
 
     # build the remote pipeline (run from inside RDIR; '.' is the meeting dir)
     local parts="" tokenline="" speakersline=""
+    # forward HF_TOKEN for both steps: transcribe downloads the Whisper model
+    # from the HF Hub too, and warns / rate-limits without a token.
+    [ -n "${HF_TOKEN:-}" ] && tokenline="export HF_TOKEN='${HF_TOKEN}'"
     if [ "${DO_TX}" -eq 1 ]; then
       parts="${RCMD} transcribe . --device ${DEVICE} ${TX_ARGS}"
     fi
     if [ "${DO_DZ}" -eq 1 ]; then
       local dz="${RCMD} diarize . --device ${DEVICE} ${DZ_ARGS}"
       if [ -n "${parts}" ]; then parts="${parts} && ${dz}"; else parts="${dz}"; fi
-      [ -n "${HF_TOKEN:-}" ] && tokenline="export HF_TOKEN='${HF_TOKEN}'"
       # point remote diarize at the library we just pushed (cwd is RDIR)
       [ -n "${LIBLOCAL}" ] && speakersline="export EARSHOT_SPEAKERS=speakers.json"
     fi

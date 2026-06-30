@@ -263,7 +263,7 @@ cmd_offload() {
   local MOSH="${EARSHOT_MOSH:-mosh}"
   local POLL="${EARSHOT_POLL_SECS:-5}"
   local DEVICE="auto"   # each step picks its own device (cuda where available)
-  local DO_TX=0 DO_DZ=0 RM_REMOTE=0 WATCH=1 COLLECT=0 FORCE=0
+  local DO_TX=0 DO_DZ=0 RM_REMOTE=0 WATCH=0 COLLECT=0 FORCE=0
   local TX_ARGS="" DZ_ARGS="" DIR="" CTX=""
 
   while [ "$#" -gt 0 ]; do
@@ -285,16 +285,16 @@ cmd_offload() {
       --dz-args)     DZ_ARGS="$2"; shift 2 ;;
       -h|--help)
         echo "usage: earshot offload DIR [--transcribe] [--diarize] [-c CONTEXT]"
-        echo "                          [--device auto] [--no-watch] [--collect]"
+        echo "                          [--device auto] [--watch] [--collect]"
         echo "                          [--force] [--rm-remote] [--host H]"
         echo "                          [--remote-dir D] [--remote-cmd C]"
         echo "                          [--tx-args \"...\"] [--dz-args \"...\"] [--poll N]"
         echo
         echo "Remote work runs in a tmux session 'earshot-<dir>' so it survives a"
-        echo "disconnect. Default: launch and attach live via mosh+tmux (like 'dgx');"
-        echo "detach with Ctrl-b d and the job keeps running."
-        echo "  --no-watch don't attach; just poll quietly until done (good for scripts)"
-        echo "  --collect  don't push/relaunch; reattach the existing job and pull"
+        echo "disconnect. Default: launch, poll quietly until done, then pull results."
+        echo "Ctrl-C during the wait is safe (the job keeps running; --collect later)."
+        echo "  --watch    attach live via mosh+tmux; detach with Ctrl-b d"
+        echo "  --collect  don't push/relaunch; wait on the existing job and pull"
         echo "  --force    if a session for this meeting exists, kill and relaunch"
         exit 0 ;;
       -*) echo "earshot offload: unknown option: $1" >&2; exit 1 ;;
@@ -319,7 +319,9 @@ cmd_offload() {
   RDIR="${RROOT%/}/${NAME}"
   SESSION="earshot-${NAME}"
 
-  local rsh="ssh ${SSH_OPTS}"
+  # -T: never request a TTY (silences "Pseudo-terminal..." and "Connection
+  # closed" noise from TTY-forcing ssh configs). LogLevel=ERROR keeps real errors.
+  local rsh="ssh -T -o LogLevel=ERROR ${SSH_OPTS}"
 
   if [ "${COLLECT}" -eq 0 ]; then
     echo "earshot offload: ${DIR} -> ${HOST}:${RDIR} (device=${DEVICE}, tmux=${SESSION})"

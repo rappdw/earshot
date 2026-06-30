@@ -51,7 +51,11 @@ RUN if [ "${CT2_CUDA}" = "1" ]; then \
 # --- earshot Python deps ----------------------------------------------------
 # Pin torch (and the source-built ctranslate2, if present) so installing
 # faster-whisper / pyannote can't replace them with CPU wheels from PyPI.
+# Pin torch AND torchaudio (pyannote pulls torchaudio; an unpinned PyPI wheel can
+# link a different CUDA and fail at runtime with libcudart.so.NN not found), plus
+# the source-built ctranslate2 if present.
 RUN python -c "import torch; print('torch=='+torch.__version__)" > /tmp/constraints.txt && \
+    (python -c "import torchaudio; print('torchaudio=='+torchaudio.__version__)" >> /tmp/constraints.txt || true) && \
     (python -c "import ctranslate2; print('ctranslate2=='+ctranslate2.__version__)" >> /tmp/constraints.txt || true) && \
     pip install --no-cache-dir -c /tmp/constraints.txt \
       "faster-whisper>=1.0.3" "pyannote.audio>=3.1"

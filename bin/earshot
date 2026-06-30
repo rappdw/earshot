@@ -110,13 +110,13 @@ load_config() {
 # Infer a context name from a meeting directory path by matching the configured
 # output roots. Echoes "business"/"personal"/"" (config must already be loaded).
 infer_context_from_dir() {
-  local d
+  local d p b
+  p="${EARSHOT_OUT_ROOT_PERSONAL:-}"   # tolerate older configs without contexts
+  b="${EARSHOT_OUT_ROOT_BUSINESS:-}"
   d="$(cd "$1" 2>/dev/null && pwd || printf '%s' "$1")"
-  case "${d}/" in
-    "${EARSHOT_OUT_ROOT_PERSONAL%/}/"*) printf 'personal\n' ;;
-    "${EARSHOT_OUT_ROOT_BUSINESS%/}/"*) printf 'business\n' ;;
-    *) printf '\n' ;;
-  esac
+  if [ -n "$p" ]; then case "${d}/" in "${p%/}/"*) printf 'personal\n'; return ;; esac; fi
+  if [ -n "$b" ]; then case "${d}/" in "${b%/}/"*) printf 'business\n'; return ;; esac; fi
+  printf '\n'
 }
 
 # Select the speaker library for a context and export EARSHOT_SPEAKERS so the
@@ -124,6 +124,8 @@ infer_context_from_dir() {
 # meeting dir (may be ""). Precedence: explicit -c > inferred from dir > default.
 resolve_speakers_lib() {
   load_config
+  # older configs predate contexts; nothing to resolve then.
+  declare -f earshot_load_context >/dev/null 2>&1 || return 0
   local ctx="$1" dir="$2"
   if [ -z "${ctx}" ] && [ -n "${dir}" ]; then
     ctx="$(infer_context_from_dir "${dir}")"
@@ -361,7 +363,8 @@ cmd_offload() {
       local octx="${CTX}"
       [ -z "${octx}" ] && octx="$(infer_context_from_dir "${DIR}")"
       [ -z "${octx}" ] && octx="${EARSHOT_DEFAULT_CONTEXT:-}"
-      if [ -n "${octx}" ] && earshot_load_context "${octx}"; then
+      if [ -n "${octx}" ] && declare -f earshot_load_context >/dev/null 2>&1 \
+         && earshot_load_context "${octx}"; then
         LIBLOCAL="${CONTEXT_SPEAKERS:-}"
       fi
       [ -z "${LIBLOCAL}" ] && LIBLOCAL="${EARSHOT_SPEAKERS:-${HOME}/.config/earshot/speakers.json}"

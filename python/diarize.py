@@ -71,6 +71,15 @@ def run_pyannote(far_path, args, device):
     from pyannote.audio import Pipeline
     import torch
 
+    # torch >= 2.6 defaults torch.load(weights_only=True), which rejects pyannote
+    # checkpoints (they pickle TorchVersion/omegaconf globals). The models come
+    # from pyannote's official HF repo you authenticated to, so load them fully.
+    _orig_torch_load = torch.load
+    def _full_load(*a, **k):
+        k["weights_only"] = False
+        return _orig_torch_load(*a, **k)
+    torch.load = _full_load
+
     pipeline = Pipeline.from_pretrained(args.model, use_auth_token=get_token(args))
     if pipeline is None:
         sys.exit(

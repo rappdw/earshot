@@ -346,7 +346,7 @@ cmd_offload() {
       [ -f "${DIR}/${f}" ] && pushlist+=("${DIR}/${f}")
     done
     echo "earshot offload: pushing audio..."
-    rsync -a --info=progress2 -e "${rsh}" "${pushlist[@]}" "${HOST}:${RDIR}/"
+    rsync -a -e "${rsh}" "${pushlist[@]}" "${HOST}:${RDIR}/"
 
     # sync the right context's speaker library up (into the meeting dir) so remote
     # diarize attributes names without mixing business/personal voiceprints.

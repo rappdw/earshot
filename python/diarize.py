@@ -71,14 +71,31 @@ def run_pyannote(far_path, args, device):
     from pyannote.audio import Pipeline
     import torch
 
-    # torch >= 2.6 defaults torch.load(weights_only=True), which rejects pyannote
-    # checkpoints (they pickle TorchVersion/omegaconf globals). The models come
-    # from pyannote's official HF repo you authenticated to, so load them fully.
+    # Compatibility shims for running pyannote.audio against a bleeding-edge
+    # NGC dev PyTorch. These are all about loading the trusted pyannote
+    # checkpoint cleanly; none change diarization behaviour.
+    #
+    # 1) torch >= 2.6 defaults torch.load(weights_only=True), which rejects
+    #    pyannote checkpoints (they pickle TorchVersion/omegaconf globals). The
+    #    models come from pyannote's official HF repo you authenticated to.
     _orig_torch_load = torch.load
     def _full_load(*a, **k):
         k["weights_only"] = False
         return _orig_torch_load(*a, **k)
     torch.load = _full_load
+
+    # 2) pyannote's checkpoint version checks parse versions with semver, which
+    #    chokes on the NGC dev torch version ("2.8.0a0+...nv25.6"). The checks
+    #    are advisory (warn on train/infer version drift) -> make them no-ops so
+    #    an unparseable dev version can't crash the load.
+    import importlib
+    for _modname in ("pyannote.audio.utils.version", "pyannote.audio.core.model"):
+        try:
+            _m = importlib.import_module(_modname)
+            if hasattr(_m, "check_version"):
+                _m.check_version = lambda *a, **k: None
+        except Exception:
+            pass
 
     pipeline = Pipeline.from_pretrained(args.model, use_auth_token=get_token(args))
     if pipeline is None:

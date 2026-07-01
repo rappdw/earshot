@@ -8,6 +8,7 @@
 #   earshot diarize DIR ...     split REMOTE into speakers + attribute names
 #   earshot attribute DIR ...   play each unknown speaker, name them, learn the voice
 #   earshot summarize DIR ...   write notes.md (local Ollama; --backend claude opt-in)
+#   earshot timing DIR ...      diagnose Whisper-vs-pyannote timestamp alignment
 #   earshot enroll NAME ...     add a voice to the speaker library
 #   earshot speakers [list|remove|rename] ...   manage the speaker library
 #   earshot offload DIR ...     run transcribe/diarize on the DGX Spark over SSH
@@ -36,7 +37,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 # ===========================================================================
@@ -259,6 +260,22 @@ cmd_attribute() {
     echo "earshot: attribute.py not found (run install.sh)" >&2; exit 1
   fi
   exec "${py}" "${script}" ${rest[@]+"${rest[@]}"}
+}
+
+# timing.py is stdlib-only; diagnostic, no config needed.
+cmd_timing() {
+  local py script="" cand
+  py="$(command -v python3 || true)"
+  if [ -z "${py}" ]; then echo "earshot: no python found" >&2; exit 1; fi
+  for cand in \
+    "${HOME}/.local/share/earshot/timing.py" \
+    "${SCRIPT_DIR}/../python/timing.py"; do
+    if [ -f "$cand" ]; then script="$cand"; break; fi
+  done
+  if [ -z "${script}" ]; then
+    echo "earshot: timing.py not found (run install.sh)" >&2; exit 1
+  fi
+  exec "${py}" "${script}" "$@"
 }
 
 # summarize.py is stdlib-only; fall back to system python3 if the venv is absent.
@@ -726,6 +743,7 @@ case "${1:-}" in
   diarize|dz)     shift; cmd_diarize "$@" ;;
   attribute|attr) shift; cmd_attribute "$@" ;;
   summarize|sum)  shift; cmd_summarize "$@" ;;
+  timing)         shift; cmd_timing "$@" ;;
   enroll)         shift; run_speakers enroll "$@" ;;
   speakers|spk)   shift; run_speakers "$@" ;;
   offload)        shift; cmd_offload "$@" ;;

@@ -16,6 +16,7 @@ import speakers as spk          # noqa: E402
 import diarize                  # noqa: E402
 import attribute                # noqa: E402
 import summarize                # noqa: E402
+import timing                   # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +233,50 @@ class TestSummarize(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True):
             with self.assertRaises(SystemExit):
                 summarize.summarize_claude("t", mock.Mock(model="m", max_tokens=64))
+
+
+# ---------------------------------------------------------------------------
+# timing.py
+# ---------------------------------------------------------------------------
+def _timing_transcript(offset_fn):
+    import random
+    random.seed(7)
+    turns, segs = [], []
+    t = 0.0
+    for i in range(40):
+        dur = random.uniform(2.0, 9.0)
+        gap = random.uniform(0.3, 4.0)
+        s, e = t, t + dur
+        turns.append({"start": s, "end": e, "speaker": f"S{i % 2}"})
+        off = offset_fn(s)
+        segs.append({"channel": "far", "speaker": "R",
+                     "start": s + off, "end": e + off, "text": "x"})
+        t = e + gap
+    return {"segments": segs, "diarization": {"turns": turns}}
+
+
+class TestTiming(unittest.TestCase):
+    def test_aligned(self):
+        r = timing.analyze(_timing_transcript(lambda s: 0.1))
+        self.assertLess(abs(r["shift"]), 1.0)
+        self.assertIn("aligned", timing.verdict(r))
+
+    def test_constant_shift_detected_with_sign(self):
+        r = timing.analyze(_timing_transcript(lambda s: 4.0))
+        self.assertAlmostEqual(r["shift"], 4.0, delta=0.5)
+        self.assertIn("constant shift", timing.verdict(r))
+        r = timing.analyze(_timing_transcript(lambda s: -2.0))
+        self.assertAlmostEqual(r["shift"], -2.0, delta=0.5)
+
+    def test_growing_drift_detected(self):
+        r = timing.analyze(_timing_transcript(lambda s: s * 0.05))
+        self.assertIn("DRIFT", timing.verdict(r))
+
+    def test_merge_and_overlap(self):
+        merged = timing.merge_intervals([(0, 5), (4, 8), (10, 12)])
+        self.assertEqual(merged, [[0, 8], [10, 12]])
+        starts = [m[0] for m in merged]
+        self.assertAlmostEqual(timing.overlap_with(merged, starts, 6, 11), 3.0)
 
 
 if __name__ == "__main__":

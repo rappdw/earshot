@@ -31,13 +31,16 @@
 # Capture records BlackHole and your mic as two parallel ffmpeg processes,
 # resolved BY NAME. A recording stops on Enter, on Ctrl-C, or automatically
 # after a sustained silence on the call channel (a meeting that has ended).
+# ==help-end==
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Help = the header comment up to the ==help-end== marker (edits to the header
+# can't silently truncate or overrun the help text).
 usage() {
-  sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,/^# ==help-end==/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
 }
 
 # Escape a string for embedding in a JSON double-quoted value.
@@ -149,12 +152,25 @@ resolve_speakers_lib() {
 }
 
 # ===========================================================================
-# Python runner (transcribe / diarize)
+# Python tool runner
 # ===========================================================================
-run_py() {
-  local script_name="$1"; shift
+# run_tool <script.py> <venv|any> [args...]
+#   venv: requires the earshot venv (heavy ML deps).
+#   any:  prefer the venv, fall back to system python3 (stdlib-only tools).
+# Resolves the script from the installed share dir, then the repo checkout.
+run_tool() {
+  local script_name="$1" need="$2"; shift 2
   local venv="${EARSHOT_VENV:-${HOME}/.local/share/earshot/venv}"
   local py="${venv}/bin/python"
+  if [ ! -x "${py}" ]; then
+    if [ "${need}" = "venv" ]; then
+      echo "earshot: Python venv not found at ${venv}" >&2
+      echo "Set it up with:  ./install.sh --with-python   (add --with-diarize for diarize)" >&2
+      exit 1
+    fi
+    py="$(command -v python3 || true)"
+    if [ -z "${py}" ]; then echo "earshot: no python found" >&2; exit 1; fi
+  fi
   local script="" cand
   for cand in \
     "${HOME}/.local/share/earshot/${script_name}" \
@@ -164,32 +180,30 @@ run_py() {
   if [ -z "${script}" ]; then
     echo "earshot: ${script_name} not found (run install.sh)" >&2; exit 1
   fi
-  if [ ! -x "${py}" ]; then
-    echo "earshot: Python venv not found at ${venv}" >&2
-    echo "Set it up with:  ./install.sh --with-python   (add --with-diarize for diarize)" >&2
-    exit 1
-  fi
   exec "${py}" "${script}" "$@"
 }
 
+# Strip -c/--context from "$@" into CTX, the rest into REST[]; resolve the
+# per-context speaker library from CTX or the first directory argument.
+parse_ctx() {
+  CTX=""; REST=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -c|--context) CTX="$2"; shift 2 ;;
+      *) REST+=("$1"); shift ;;
+    esac
+  done
+  local dir="" t
+  for t in ${REST[@]+"${REST[@]}"}; do [ -d "${t}" ] && { dir="${t}"; break; }; done
+  resolve_speakers_lib "${CTX}" "${dir}"
+}
+
 cmd_transcribe() {
-  run_py transcribe.py "$@"
+  run_tool transcribe.py venv "$@"
 }
 
 cmd_diarize() {
-  # pull out -c/--context; pass the rest through untouched
-  local ctx="" rest=()
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      -c|--context) ctx="$2"; shift 2 ;;
-      *) rest+=("$1"); shift ;;
-    esac
-  done
-  # infer the meeting dir as the first existing directory among the args
-  local dir="" t
-  for t in ${rest[@]+"${rest[@]}"}; do [ -d "${t}" ] && { dir="${t}"; break; }; done
-  resolve_speakers_lib "${ctx}" "${dir}"
-
+  parse_ctx "$@"
   local venv="${EARSHOT_VENV:-${HOME}/.local/share/earshot/venv}"
   local py="${venv}/bin/python"
   if [ -x "${py}" ] && ! "${py}" -c "import pyannote.audio" >/dev/null 2>&1; then
@@ -197,113 +211,36 @@ cmd_diarize() {
     echo "Install it with:  ./install.sh --with-diarize" >&2
     exit 1
   fi
-  run_py diarize.py ${rest[@]+"${rest[@]}"}
+  run_tool diarize.py venv ${REST[@]+"${REST[@]}"}
 }
 
-# speakers.py needs only stdlib for list/remove/rename/enroll-from-meeting, so
-# fall back to system python3 when the venv is not built. (enroll --file still
-# needs the venv's pyannote and will say so.)
+# speakers/attribute are stdlib-only (enroll --file still needs the venv's
+# pyannote and says so itself).
 run_speakers() {
-  # pull out -c/--context; the rest goes to speakers.py
-  local ctx="" rest=()
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      -c|--context) ctx="$2"; shift 2 ;;
-      *) rest+=("$1"); shift ;;
-    esac
-  done
-  # for enroll --from DIR, infer context from that dir
-  local dir="" t
-  for t in ${rest[@]+"${rest[@]}"}; do [ -d "${t}" ] && { dir="${t}"; break; }; done
-  resolve_speakers_lib "${ctx}" "${dir}"
-
-  local venv="${EARSHOT_VENV:-${HOME}/.local/share/earshot/venv}"
-  local py="${venv}/bin/python"
-  if [ ! -x "${py}" ]; then py="$(command -v python3 || true)"; fi
-  if [ -z "${py}" ]; then echo "earshot: no python found" >&2; exit 1; fi
-  local script="" cand
-  for cand in \
-    "${HOME}/.local/share/earshot/speakers.py" \
-    "${SCRIPT_DIR}/../python/speakers.py"; do
-    if [ -f "$cand" ]; then script="$cand"; break; fi
-  done
-  if [ -z "${script}" ]; then
-    echo "earshot: speakers.py not found (run install.sh)" >&2; exit 1
-  fi
-  exec "${py}" "${script}" ${rest[@]+"${rest[@]}"}
+  parse_ctx "$@"
+  run_tool speakers.py any ${REST[@]+"${REST[@]}"}
 }
 
-cmd_devices() {
-  av_print_list
-}
-
-# attribute.py is stdlib-only (needs ffmpeg + a player, not the venv). Resolve
-# the per-context speaker library first (like diarize), then run it.
 cmd_attribute() {
-  local ctx="" rest=()
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      -c|--context) ctx="$2"; shift 2 ;;
-      *) rest+=("$1"); shift ;;
-    esac
-  done
-  local dir="" t
-  for t in ${rest[@]+"${rest[@]}"}; do [ -d "${t}" ] && { dir="${t}"; break; }; done
-  resolve_speakers_lib "${ctx}" "${dir}"
-
-  local venv="${EARSHOT_VENV:-${HOME}/.local/share/earshot/venv}"
-  local py="${venv}/bin/python"
-  if [ ! -x "${py}" ]; then py="$(command -v python3 || true)"; fi
-  if [ -z "${py}" ]; then echo "earshot: no python found" >&2; exit 1; fi
-  local script="" cand
-  for cand in \
-    "${HOME}/.local/share/earshot/attribute.py" \
-    "${SCRIPT_DIR}/../python/attribute.py"; do
-    if [ -f "$cand" ]; then script="$cand"; break; fi
-  done
-  if [ -z "${script}" ]; then
-    echo "earshot: attribute.py not found (run install.sh)" >&2; exit 1
-  fi
-  exec "${py}" "${script}" ${rest[@]+"${rest[@]}"}
+  parse_ctx "$@"
+  run_tool attribute.py any ${REST[@]+"${REST[@]}"}
 }
 
-# timing.py is stdlib-only; diagnostic, no config needed.
 cmd_timing() {
-  local py script="" cand
-  py="$(command -v python3 || true)"
-  if [ -z "${py}" ]; then echo "earshot: no python found" >&2; exit 1; fi
-  for cand in \
-    "${HOME}/.local/share/earshot/timing.py" \
-    "${SCRIPT_DIR}/../python/timing.py"; do
-    if [ -f "$cand" ]; then script="$cand"; break; fi
-  done
-  if [ -z "${script}" ]; then
-    echo "earshot: timing.py not found (run install.sh)" >&2; exit 1
-  fi
-  exec "${py}" "${script}" "$@"
+  run_tool timing.py any "$@"
 }
 
-# summarize.py is stdlib-only; fall back to system python3 if the venv is absent.
 # Loads config and exports the summary settings so summarize.py picks them up.
 cmd_summarize() {
   load_config
   export EARSHOT_SUMMARY_BACKEND EARSHOT_OLLAMA_URL EARSHOT_OLLAMA_MODEL \
          EARSHOT_OPENAI_URL EARSHOT_OPENAI_MODEL EARSHOT_OPENAI_API_KEY \
          EARSHOT_CLAUDE_MODEL EARSHOT_SUMMARY_MAX_TOKENS
-  local venv="${EARSHOT_VENV:-${HOME}/.local/share/earshot/venv}"
-  local py="${venv}/bin/python"
-  if [ ! -x "${py}" ]; then py="$(command -v python3 || true)"; fi
-  if [ -z "${py}" ]; then echo "earshot: no python found" >&2; exit 1; fi
-  local script="" cand
-  for cand in \
-    "${HOME}/.local/share/earshot/summarize.py" \
-    "${SCRIPT_DIR}/../python/summarize.py"; do
-    if [ -f "$cand" ]; then script="$cand"; break; fi
-  done
-  if [ -z "${script}" ]; then
-    echo "earshot: summarize.py not found (run install.sh)" >&2; exit 1
-  fi
-  exec "${py}" "${script}" "$@"
+  run_tool summarize.py any "$@"
+}
+
+cmd_devices() {
+  av_print_list
 }
 
 # ===========================================================================

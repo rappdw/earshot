@@ -164,6 +164,17 @@ check "clear pre-context error" "predates contexts" "$OUT"
 [ "$RC" -ne 0 ] && ok "rec -c exits non-zero on old conf" || fail "rec -c exits non-zero"
 
 # ==========================================================================
+echo "[dispatch] every python subcommand reaches its tool (not bash breakage)"
+OUT="$("${EARSHOT}" timing /nonexistent 2>&1)";    check "timing dispatches" "transcript.json not found" "$OUT"
+OUT="$("${EARSHOT}" attribute /nonexistent 2>&1)"; check "attribute dispatches" "transcript.json not found" "$OUT"
+OUT="$("${EARSHOT}" speakers list 2>&1)";          check "speakers dispatches" "speakers" "$OUT"
+OUT="$("${EARSHOT}" summarize 2>&1)";              check "summarize dispatches" "meeting directory" "$OUT"
+OUT="$("${EARSHOT}" help 2>&1)"
+check "help shows subcommands" "earshot offload DIR" "$OUT"
+check_not "help stops at marker (no code leaks)" "set -euo" "$OUT"
+check_not "help omits the marker itself" "==help-end==" "$OUT"
+
+# ==========================================================================
 echo
 echo "bash tests: ${PASS} passed, ${FAIL} failed"
 [ "${FAIL}" -eq 0 ]

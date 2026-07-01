@@ -78,13 +78,14 @@ def extract_clip(far, start, dur):
 
 
 def play(path):
+    """Play the clip; return the player name used, or None if none available."""
     if shutil.which("afplay"):
         subprocess.run(["afplay", path])
-        return True
+        return "afplay"
     if shutil.which("ffplay"):
         subprocess.run(["ffplay", "-autoexit", "-nodisp", "-loglevel", "error", path])
-        return True
-    return False
+        return "ffplay"
+    return None
 
 
 def apply_names(transcript, mapping):
@@ -154,12 +155,22 @@ def main():
             continue
         start, dur, text = samp
         clip = extract_clip(far, start, dur)
+        keep_clip = False
         try:
+            size = os.path.getsize(clip)
             hint = (text[:80] + "...") if len(text) > 80 else text
-            print(f"--- {label}  [{fmt_ts(start)}]  \"{hint}\"", file=sys.stderr)
+            print(f"--- {label}  [{fmt_ts(start)}]  ({dur:.0f}s, {size} bytes)  \"{hint}\"",
+                  file=sys.stderr)
+            if size < 1024:
+                print("  WARNING: the extracted sample is empty/tiny - the segment may be "
+                      "silent or beyond the end of far_remote.wav.", file=sys.stderr)
             while True:
-                if not play(clip):
-                    print("  (no audio player found; install afplay/ffplay)", file=sys.stderr)
+                print(f"  playing sample ({dur:.0f}s)...", file=sys.stderr)
+                player = play(clip)
+                if player is None:
+                    print("  NO AUDIO PLAYER FOUND - install afplay (macOS) or ffplay.", file=sys.stderr)
+                    print(f"  clip left at {clip} - play it manually to check.", file=sys.stderr)
+                    keep_clip = True
                 ans = input(f"  {label} is: ").strip()
                 if ans == "r":
                     continue
@@ -177,7 +188,8 @@ def main():
                     print(f"  named '{ans}' for this transcript (no embedding to learn from)", file=sys.stderr)
                 break
         finally:
-            os.unlink(clip)
+            if not keep_clip:
+                os.unlink(clip)
         if todo == []:
             break
 

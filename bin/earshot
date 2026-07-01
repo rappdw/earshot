@@ -326,8 +326,8 @@ cmd_offload() {
         echo "                          [--remote-dir D] [--remote-cmd C]"
         echo "                          [--tx-args ...] [--dz-args ...] [--sum-args ...] [--poll N]"
         echo
-        echo "Runs the chosen steps (default: transcribe) in a tmux session on the host,"
-        echo "polls quietly, then pulls transcript.json/.md and notes.md back."
+        echo "Runs the chosen steps (default: transcribe + diarize) in a tmux session on"
+        echo "the host, polls quietly, then pulls transcript.json/.md and notes.md back."
         echo "Ctrl-C during the wait is safe (the job keeps running; --collect later)."
         echo "  --summarize  also write notes.md (needs Ollama on the host; see docker/README.md)"
         echo "  --watch      attach live via mosh+tmux; detach with Ctrl-b d"
@@ -349,7 +349,8 @@ cmd_offload() {
     echo "earshot offload: no Spark host. Set EARSHOT_SPARK_HOST in earshot.conf or pass --host" >&2
     exit 1
   fi
-  if [ "${DO_TX}" -eq 0 ] && [ "${DO_DZ}" -eq 0 ] && [ "${DO_SUM}" -eq 0 ]; then DO_TX=1; fi
+  # default: transcribe + diarize (summarize stays opt-in via --summarize)
+  if [ "${DO_TX}" -eq 0 ] && [ "${DO_DZ}" -eq 0 ] && [ "${DO_SUM}" -eq 0 ]; then DO_TX=1; DO_DZ=1; fi
 
   local NAME RDIR SESSION
   NAME="$(basename "${DIR}")"

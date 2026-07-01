@@ -105,7 +105,7 @@ earshot diarize DIR                   # split REMOTE into speakers, attribute na
 earshot summarize DIR                 # write notes.md (local Ollama by default)
 earshot enroll Dan --from DIR --speaker REMOTE-1   # teach a voice from a meeting
 earshot speakers list                 # who's enrolled
-earshot offload DIR --diarize         # run it all on the Spark over SSH
+earshot offload DIR                   # transcribe + diarize on the Spark over SSH
 earshot help
 ```
 
@@ -177,13 +177,14 @@ Don't use it for sensitive meetings.
 
 `earshot offload DIR` ships the audio to a CUDA host over SSH + rsync, runs the
 work there inside a tmux session (so it survives a disconnect), and pulls the
-results back. By default it attaches live via mosh; `--no-watch` for
-fire-and-forget, `--collect` to reconnect to a still-running job. The host needs
-earshot installed (`--with-python --with-diarize`), a CUDA-matched torch, and
-`tmux` (+ `mosh-server` for `--watch`). Configure the host in `earshot.conf`.
+results back. It **transcribes + diarizes by default**; it polls quietly (Ctrl-C
+is safe, the job keeps running), with `--watch` to attach live via mosh and
+`--collect` to reconnect to a running job. The host needs earshot installed
+(`--with-python --with-diarize`), a CUDA-matched torch, and `tmux` (+
+`mosh-server` for `--watch`). Configure the host in `earshot.conf`.
 
 You can offload any combination of `--transcribe`, `--diarize`, and
-`--summarize` (summarization runs against an Ollama server on the host). To run
+`--summarize` (summarization runs against an Ollama/vLLM server on the host). To run
 the remote steps in a **CUDA container** instead of a venv (reproducible GPU
 environment on NVIDIA's NGC base, no torch fiddling), see
 [`docker/README.md`](docker/README.md). It's a drop-in: build the image on the

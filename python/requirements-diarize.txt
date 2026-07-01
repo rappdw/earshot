@@ -2,6 +2,11 @@
 # pulls in torch/torchaudio, which is large). Installed into the same venv by:
 #   ./install.sh --with-diarize
 #
+# huggingface_hub is capped <1.0: pyannote.audio 3.x calls
+# hf_hub_download(use_auth_token=...), which hub 1.x removed (TypeError at
+# diarize time). Same cap as docker/Dockerfile — keep them in sync.
+#
 # On the DGX Spark you may need a CUDA-matched torch build; if the default wheel
 # lands as CPU-only, reinstall torch from the appropriate CUDA index first.
-pyannote.audio>=3.1
+pyannote.audio>=3.1,<4
+huggingface_hub<1.0

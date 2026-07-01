@@ -1,4 +1,9 @@
 # earshot transcription dependencies.
 # faster-whisper pulls in ctranslate2, tokenizers, onnxruntime (for VAD), av.
 # Runs CPU-int8 on Apple Silicon, CUDA-fp16 on the DGX Spark.
-faster-whisper>=1.0.3
+#
+# huggingface_hub<1.0: faster-whisper is fine on hub 1.x, but this venv is
+# shared with the diarization deps (pyannote needs hub<1.0). Cap here too so
+# `install.sh --with-python` can never upgrade hub and break diarize.
+faster-whisper>=1.0.3,<2
+huggingface_hub<1.0

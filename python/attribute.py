@@ -52,18 +52,46 @@ def unidentified_labels(transcript):
     return [l for l in labels if l and REMOTE_RE.match(l)]
 
 
+def _far_text_at(transcript, start, end):
+    """Best-effort transcript text overlapping [start, end] on the far channel."""
+    for s in transcript.get("segments", []):
+        if s.get("channel") != "far" or not s.get("text"):
+            continue
+        ss = float(s.get("start") or 0.0)
+        se = float(s.get("end") or ss)
+        if min(end, se) - max(start, ss) > 0:
+            return s["text"].strip()
+    return ""
+
+
 def sample_segment(transcript, label, max_dur):
-    """Pick a representative far-channel segment for this speaker; return
-    (start, dur, text) or None."""
-    cands = [s for s in transcript.get("segments", [])
-             if s.get("channel") == "far" and s.get("speaker") == label
-             and s.get("start") is not None and s.get("end") is not None]
-    if not cands:
-        return None
-    best = max(cands, key=lambda s: (s["end"] - s["start"]))
-    start = float(best["start"])
-    dur = min(float(max_dur), float(best["end"]) - start)
-    return start, max(dur, 1.0), (best.get("text") or "").strip()
+    """Pick a representative sample interval for this speaker; return
+    (start, dur, hint_text) or None.
+
+    Prefer the pyannote diarization *turns*: they're computed directly on
+    far_remote.wav, so their timestamps match the audio exactly. Transcript
+    segment timestamps come from Whisper and can drift from the audio, which
+    makes the played clip not line up. Fall back to segments if no turns.
+    """
+    diar = transcript.get("diarization") or {}
+    turns = diar.get("turns") or []
+    label_map = diar.get("label_map") or {}
+    raw = {r for r, f in label_map.items() if f == label}
+    tcands = [t for t in turns
+              if t.get("speaker") in raw or t.get("speaker") == label]
+    if tcands:
+        best = max(tcands, key=lambda t: (t["end"] - t["start"]))
+        start = float(best["start"])
+    else:
+        scands = [s for s in transcript.get("segments", [])
+                  if s.get("channel") == "far" and s.get("speaker") == label
+                  and s.get("start") is not None and s.get("end") is not None]
+        if not scands:
+            return None
+        best = max(scands, key=lambda s: (s["end"] - s["start"]))
+        start = float(best["start"])
+    dur = max(min(float(max_dur), float(best["end"]) - start), 1.0)
+    return start, dur, _far_text_at(transcript, start, start + dur)
 
 
 def extract_clip(far, start, dur):

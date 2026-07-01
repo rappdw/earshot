@@ -447,13 +447,15 @@ cmd_offload() {
     fi
 
     # generate the runner: tee to run.log (so --watch shows live output) and
-    # record the pipeline's exit code in .status when finished.
+    # record the pipeline's exit code in .status when finished. The runner
+    # deletes itself first (bash keeps the fd; execution is unaffected) so the
+    # exported secrets exist on the remote disk only between push and launch.
     local TMPRUN
     TMPRUN="$(mktemp)"
     cat > "${TMPRUN}" <<EOF
 #!/usr/bin/env bash
 cd "\$(dirname "\$0")" || exit 1
-rm -f .status
+rm -f -- "\$0" .status
 ${tokenline}
 ${apikeyline}
 ${speakersline}

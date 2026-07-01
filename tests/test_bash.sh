@@ -99,6 +99,18 @@ check "pull includes notes.md" "notes.md" "$LOG"
 check_not "no mosh by default" "MOSH|" "$LOG"
 
 # ==========================================================================
+echo "[offload] generated runner executes, self-deletes, records status"
+RUNDIR="${WORK}/exec"; mkdir -p "${RUNDIR}"
+# stand in for the remote earshot command so the real pipeline line runs
+FAKE="${WORK}/fake-earshot"; printf '#!/usr/bin/env bash\nexit 0\n' > "${FAKE}"; chmod +x "${FAKE}"
+sed "s|~/earshot/docker/earshot-container|${FAKE}|g" "${TEST_LOG}.run.sh" > "${RUNDIR}/.run.sh"
+bash "${RUNDIR}/.run.sh" >/dev/null 2>&1
+[ "$(cat "${RUNDIR}/.status" 2>/dev/null)" = "0" ] && ok "status recorded 0" || fail "status recorded 0"
+[ ! -f "${RUNDIR}/.run.sh" ] && ok "runner self-deleted (secrets off disk)" || fail "runner self-deleted"
+[ -f "${RUNDIR}/run.log" ] && ok "run.log kept for debugging" || fail "run.log kept"
+check "runner had secrets before running" "hf_TEST" "$(cat "${TEST_LOG}.run.sh")"
+
+# ==========================================================================
 echo "[offload] --summarize appends step; session guard refuses without --force"
 export TEST_LOG="${WORK}/t2.log"; : > "${TEST_LOG}"
 "${EARSHOT}" offload "${M}" --summarize --sum-args "--backend vllm --model x" --poll 1 >/dev/null 2>&1

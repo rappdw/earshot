@@ -296,6 +296,24 @@ class TestTiming(unittest.TestCase):
         r = timing.analyze(_timing_transcript(lambda s: s * 0.05))
         self.assertIn("DRIFT", timing.verdict(r))
 
+    def test_sparse_junk_start_is_not_drift(self):
+        # regression: an aligned meeting whose quiet first minutes contain a
+        # few Whisper hallucinations (no matching turns) must not read as
+        # DRIFT; the sparse third anchors to the global shift.
+        t = _timing_transcript(lambda s: -0.25)
+        for s in t["segments"]:
+            s["start"] += 120.0
+            s["end"] += 120.0
+        for turn in t["diarization"]["turns"]:
+            turn["start"] += 120.0
+            turn["end"] += 120.0
+        for js in (5.0, 40.0, 80.0):
+            t["segments"].insert(0, {"channel": "far", "speaker": "R",
+                                     "start": js, "end": js + 2.0, "text": "uh"})
+        r = timing.analyze(t)
+        self.assertIn("aligned", timing.verdict(r))
+        self.assertFalse(r["thirds_confident"][0])   # sparse third flagged
+
     def test_merge_and_overlap(self):
         merged = timing.merge_intervals([(0, 5), (4, 8), (10, 12)])
         self.assertEqual(merged, [[0, 8], [10, 12]])

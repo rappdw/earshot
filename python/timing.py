@@ -45,17 +45,29 @@ def overlap_with(merged, starts, s, e):
     return total
 
 
-def best_shift(segs, merged, starts, lo=-45.0, hi=45.0, step=0.25):
+def _score(segs, merged, starts, d):
+    return sum(overlap_with(merged, starts, s["start"] - d, s["end"] - d)
+               for s in segs)
+
+
+def best_shift(segs, merged, starts, lo=-45.0, hi=45.0, step=0.25, anchor=None):
     """Shift (subtracted from segment times) that maximizes overlap with the
-    turn speech-mask, i.e. the estimated Whisper-minus-audio offset."""
+    turn speech-mask, i.e. the estimated Whisper-minus-audio offset.
+
+    With an anchor (the whole-meeting shift): a sparse subset can produce a
+    spurious correlation peak far from truth, so keep the anchor unless a
+    candidate beats it by a clear margin (>5% more overlap)."""
     best_d, best_score = 0.0, -1.0
     d = lo
     while d <= hi + 1e-9:
-        score = sum(overlap_with(merged, starts, s["start"] - d, s["end"] - d)
-                    for s in segs)
+        score = _score(segs, merged, starts, d)
         if score > best_score:
             best_score, best_d = score, d
         d += step
+    if anchor is not None:
+        anchor_score = _score(segs, merged, starts, anchor)
+        if anchor_score >= 0.95 * best_score:
+            return anchor
     return best_d
 
 
@@ -80,8 +92,18 @@ def analyze(transcript):
     for s in segs:
         third_segs[min(int(3 * (s["start"] - t0) / span), 2)].append(s)
 
-    shifts = [best_shift(t, merged, starts) if t else None for t in third_segs]
     overall = best_shift(segs, merged, starts)
+    # anchor per-third estimates to the whole-meeting shift, and treat thirds
+    # with little speech as low-confidence (their correlation is unreliable)
+    shifts, confident = [], []
+    for t in third_segs:
+        if not t:
+            shifts.append(None)
+            confident.append(False)
+            continue
+        shifts.append(best_shift(t, merged, starts, anchor=overall))
+        dur = sum(s["end"] - s["start"] for s in t)
+        confident.append(len(t) >= 10 and dur >= 30.0)
 
     # after removing the overall shift, how well do segments sit in speech?
     weak = 0
@@ -96,13 +118,17 @@ def analyze(transcript):
         "n_turns": len(turns),
         "shift": overall,
         "shift_thirds": shifts,
+        "thirds_confident": confident,
+        "thirds_n": [len(t) for t in third_segs],
         "residual_weak_pct": 100.0 * weak / len(segs),
     }
 
 
 def verdict(r):
     lines = []
-    th = [t for t in r["shift_thirds"] if t is not None]
+    # drift is judged only on thirds with enough speech to correlate reliably
+    th = [s for s, c in zip(r["shift_thirds"], r["thirds_confident"])
+          if s is not None and c]
     growth = (th[-1] - th[0]) if len(th) >= 2 else 0.0
     if abs(growth) >= 1.0:
         lines.append(f"VERDICT: DRIFT — the Whisper-vs-audio shift grows from "
@@ -139,8 +165,11 @@ def main():
     r = analyze(transcript)
     print(f"segments (far, non-empty): {r['n_segments']}   turns: {r['n_turns']}")
     print(f"estimated shift (whisper - audio): {r['shift']:+.2f}s")
-    print("shift by meeting third: "
-          + "  ".join("n/a" if x is None else f"{x:+.2f}s" for x in r["shift_thirds"]))
+    cells = []
+    for x, c, n in zip(r["shift_thirds"], r["thirds_confident"], r["thirds_n"]):
+        cells.append("n/a" if x is None
+                     else f"{x:+.2f}s (n={n}{'' if c else ', low-confidence'})")
+    print("shift by meeting third: " + "  ".join(cells))
     print(f"segments outside speech even after correction: {r['residual_weak_pct']:.0f}%")
     print()
     print(verdict(r))

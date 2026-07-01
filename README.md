@@ -1,5 +1,7 @@
 # earshot
 
+[![ci](https://github.com/rappdw/earshot/actions/workflows/ci.yml/badge.svg)](https://github.com/rappdw/earshot/actions/workflows/ci.yml)
+
 A fully local meeting capture, transcription, diarization, and notes pipeline for macOS.
 
 earshot records your meetings, transcribes them with Whisper, figures out who

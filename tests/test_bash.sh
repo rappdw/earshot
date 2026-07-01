@@ -44,7 +44,8 @@ EOF
 cat > "${STUB}/rsync" <<'EOF'
 #!/usr/bin/env bash
 echo "RSYNC|$*" >> "${TEST_LOG}"
-dest="${@: -1}"; src="${@: -2:1}"
+# bash-3.2-safe last / second-to-last positional (macOS runners)
+dest="${!#}"; n=$(($# - 1)); src="${!n}"
 case "$dest" in *.run.sh) cp "$src" "${TEST_LOG}.run.sh" ;; esac
 EOF
 cat > "${STUB}/mosh" <<'EOF'

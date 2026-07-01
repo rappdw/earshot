@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: python unit tests
+        run: python3 -m unittest discover -s tests -v
+      - name: bash integration tests (stubbed)
+        # On macOS invoke with /bin/bash explicitly: that's bash 3.2, the
+        # oldest environment earshot must support. Linux exercises modern bash.
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            /bin/bash --version | head -1
+            /bin/bash tests/test_bash.sh
+          else
+            bash tests/test_bash.sh
+          fi
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck (warning severity)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q shellcheck
+          shellcheck -S warning bin/earshot install.sh \
+            docker/earshot-container docker/install-dgx.sh tests/*.sh
+      - name: bash syntax
+        run: |
+          for f in bin/earshot install.sh docker/earshot-container \
+                   docker/install-dgx.sh tests/*.sh; do
+            bash -n "$f"
+          done
+      - name: python compiles
+        run: python3 -m py_compile python/*.py tests/*.py
+      - name: plugin manifests are valid JSON
+        run: |
+          python3 - <<'PY'
+          import json
+          for f in (".claude-plugin/plugin.json", ".claude-plugin/marketplace.json"):
+              json.load(open(f))
+          print("manifests OK")
+          PY
+      # The Docker image itself is not built here: it needs an NGC login, an
+      # aarch64 GPU host, and a tens-of-minutes CUDA CTranslate2 compile. The
+      # Dockerfile carries its own build-time smoke test instead.

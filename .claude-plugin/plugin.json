@@ -1,6 +1,6 @@
 {
   "name": "earshot",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Skills for the earshot fully-local meeting pipeline — turn diarized transcripts and live notes into meeting narratives, with more meeting-intelligence skills to come",
   "author": {
     "name": "rappdw",

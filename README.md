@@ -129,6 +129,21 @@ Future meetings then attribute those voices automatically. Enrolling the same
 person from several meetings improves accuracy. Each diarize run prints the
 match confidence so you can tune `--id-threshold`.
 
+Or do it by ear with **attribution**: for each still-anonymous speaker it plays
+a sample and asks who it is, then both enrolls them (for future meetings) and
+relabels this transcript:
+
+```bash
+earshot attribute ~/Notes/meetings/business/2026-06-29_1430_standup
+# plays REMOTE-1's voice -> you type "Dan"; plays REMOTE-2 -> "Sara"; ...
+```
+
+For each unknown `REMOTE-N` it plays a clip from `far_remote.wav`, you type a
+name (or Enter to skip, `r` to replay, `q` to quit). Named speakers are added to
+the library and the meeting's `transcript.json`/`transcript.md` are rewritten
+with the names. Needs `ffmpeg` and a player (`afplay` on macOS). Run it after
+`diarize`.
+
 ### Contexts (business vs personal)
 
 Contexts route recordings to separate directories and keep separate speaker

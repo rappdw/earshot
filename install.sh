@@ -61,7 +61,7 @@ ensure_venv() {
 
 # --- sanity: sources present ------------------------------------------------
 for f in bin/earshot \
-         python/transcribe.py python/diarize.py python/speakers.py python/summarize.py \
+         python/transcribe.py python/diarize.py python/speakers.py python/summarize.py python/attribute.py \
          python/requirements.txt python/requirements-diarize.txt \
          etc/earshot.conf; do
   if [ ! -f "${SRC_DIR}/${f}" ]; then
@@ -81,6 +81,8 @@ install -m 0644 "${SRC_DIR}/python/speakers.py" "${SHARE_DIR}/speakers.py"
 echo "installed ${SHARE_DIR}/speakers.py"
 install -m 0644 "${SRC_DIR}/python/summarize.py" "${SHARE_DIR}/summarize.py"
 echo "installed ${SHARE_DIR}/summarize.py"
+install -m 0644 "${SRC_DIR}/python/attribute.py" "${SHARE_DIR}/attribute.py"
+echo "installed ${SHARE_DIR}/attribute.py"
 
 # --- install the config (preserve existing) ---------------------------------
 mkdir -p "${CONF_DIR}"

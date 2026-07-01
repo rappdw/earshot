@@ -6,6 +6,7 @@
 #   earshot devices             list current audio input devices and indices
 #   earshot transcribe DIR ...  transcribe a meeting folder (faster-whisper)
 #   earshot diarize DIR ...     split REMOTE into speakers + attribute names
+#   earshot attribute DIR ...   play each unknown speaker, name them, learn the voice
 #   earshot summarize DIR ...   write notes.md (local Ollama; --backend claude opt-in)
 #   earshot enroll NAME ...     add a voice to the speaker library
 #   earshot speakers [list|remove|rename] ...   manage the speaker library
@@ -35,7 +36,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 # ===========================================================================
@@ -228,6 +229,36 @@ run_speakers() {
 
 cmd_devices() {
   av_print_list
+}
+
+# attribute.py is stdlib-only (needs ffmpeg + a player, not the venv). Resolve
+# the per-context speaker library first (like diarize), then run it.
+cmd_attribute() {
+  local ctx="" rest=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -c|--context) ctx="$2"; shift 2 ;;
+      *) rest+=("$1"); shift ;;
+    esac
+  done
+  local dir="" t
+  for t in ${rest[@]+"${rest[@]}"}; do [ -d "${t}" ] && { dir="${t}"; break; }; done
+  resolve_speakers_lib "${ctx}" "${dir}"
+
+  local venv="${EARSHOT_VENV:-${HOME}/.local/share/earshot/venv}"
+  local py="${venv}/bin/python"
+  if [ ! -x "${py}" ]; then py="$(command -v python3 || true)"; fi
+  if [ -z "${py}" ]; then echo "earshot: no python found" >&2; exit 1; fi
+  local script="" cand
+  for cand in \
+    "${HOME}/.local/share/earshot/attribute.py" \
+    "${SCRIPT_DIR}/../python/attribute.py"; do
+    if [ -f "$cand" ]; then script="$cand"; break; fi
+  done
+  if [ -z "${script}" ]; then
+    echo "earshot: attribute.py not found (run install.sh)" >&2; exit 1
+  fi
+  exec "${py}" "${script}" ${rest[@]+"${rest[@]}"}
 }
 
 # summarize.py is stdlib-only; fall back to system python3 if the venv is absent.
@@ -692,6 +723,7 @@ case "${1:-}" in
   devices)        cmd_devices ;;
   transcribe|tx)  shift; cmd_transcribe "$@" ;;
   diarize|dz)     shift; cmd_diarize "$@" ;;
+  attribute|attr) shift; cmd_attribute "$@" ;;
   summarize|sum)  shift; cmd_summarize "$@" ;;
   enroll)         shift; run_speakers enroll "$@" ;;
   speakers|spk)   shift; run_speakers "$@" ;;

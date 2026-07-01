@@ -72,6 +72,22 @@ RUN python -c "import torch; print('torch=='+torch.__version__)" > /tmp/constrai
       --index-url https://download.pytorch.org/whl/cpu "torchaudio==${TMINOR}.*" && \
     python -c "import torchaudio; print('torchaudio OK', torchaudio.__version__)"
 
+# Build-time smoke test: import the full dependency chain and assert the pins
+# held, so a dependency-API break fails the BUILD with a named cause instead of
+# failing the first diarize run. (Model loading itself needs network + an HF
+# token, so that part can only be exercised at runtime.)
+RUN python - <<'PY'
+import importlib.metadata as m
+import ctranslate2, faster_whisper, torchaudio
+from pyannote.audio import Pipeline  # noqa: F401 - the import chain that broke twice
+hub = m.version("huggingface_hub")
+assert int(hub.split(".")[0]) < 1, f"huggingface_hub {hub} >= 1.0 breaks pyannote (use_auth_token)"
+# (no GPU at build time; install-dgx.sh verifies CUDA post-build with --gpus all)
+print("smoke OK | hub", hub,
+      "| ctranslate2", ctranslate2.__version__,
+      "| torchaudio", torchaudio.__version__)
+PY
+
 # earshot's Python steps. diarize.py imports speakers.py, so both must be here.
 COPY python/transcribe.py python/diarize.py python/speakers.py python/summarize.py /opt/earshot/
 

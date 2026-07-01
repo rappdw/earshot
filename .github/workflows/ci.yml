@@ -14,7 +14,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: python unit tests
         run: python3 -m unittest discover -s tests -v
       - name: bash integration tests (stubbed)
@@ -32,7 +32,7 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: shellcheck (warning severity)
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q shellcheck

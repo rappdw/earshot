@@ -1,0 +1,18 @@
+{
+  "name": "earshot",
+  "owner": {
+    "name": "Dan Rapp",
+    "url": "https://github.com/rappdw"
+  },
+  "plugins": [
+    {
+      "name": "earshot",
+      "description": "Skills for the earshot fully-local meeting pipeline — turn diarized transcripts and live notes into meeting narratives, with more meeting-intelligence skills to come",
+      "source": "./",
+      "author": {
+        "name": "Dan Rapp",
+        "url": "https://github.com/rappdw"
+      }
+    }
+  ]
+}

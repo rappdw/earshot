@@ -232,6 +232,25 @@ Spark offload host.
 - **Auto-stop** can trip early on a genuine multi-minute lull. Raise the
   threshold or use `--no-auto-stop` for meetings likely to go quiet.
 
+## Claude Code plugin (skills)
+
+The repo doubles as a Claude Code plugin carrying skills that work on earshot
+output. Install it in Claude Code:
+
+```
+/plugin marketplace add rappdw/earshot
+/plugin install earshot@earshot
+```
+
+Skills:
+
+- **`/meeting-narrative <meeting-dir>`** — synthesize a diarized earshot
+  meeting (plus any notes you took live with thinkkit's `/take-notes`) into
+  `narrative.md`: a topic-organized story of the meeting with decisions,
+  action items, significant realizations, and open questions.
+
+More meeting-intelligence skills will land here as they're built.
+
 ## Roadmap
 
 - Convenience: auto-detect call start, hotkey trigger, calendar-based titling.

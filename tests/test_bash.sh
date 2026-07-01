@@ -145,6 +145,25 @@ check_not "no 'command not found'" "command not found" "$OUT"
 check "offload still completes" "done ->" "$OUT"
 
 # ==========================================================================
+echo "[edges] unsafe meeting-dir name rejected; json_escape handles backslash"
+BAD="${WORK}/meet/personal/bad name'"; mkdir -p "${BAD}"; : > "${BAD}/far_remote.wav"
+export TEST_LOG="${WORK}/t5.log"; : > "${TEST_LOG}"
+OUT="$("${EARSHOT}" offload "${BAD}" --poll 1 2>&1)"; RC=$?
+check "unsafe name rejected" "unsafe" "$OUT"
+[ "$RC" -ne 0 ] && ok "unsafe name exits non-zero" || fail "unsafe name exits non-zero"
+
+# extract json_escape from the script and exercise it
+eval "$(sed -n '/^json_escape()/,/^}/p' "${EARSHOT}")"
+ESC="$(json_escape 'a "quote" and \ backslash')"
+OUT="$(printf '{"t": "%s"}' "${ESC}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["t"])')"
+check "json_escape round-trips through a JSON parser" 'a "quote" and \ backslash' "$OUT"
+
+echo "[edges] rec -c with a pre-context config gives a clear error"
+OUT="$(EARSHOT_CONF="${OLDCONF}" "${EARSHOT}" rec -c business -t x 2>&1 </dev/null)"; RC=$?
+check "clear pre-context error" "predates contexts" "$OUT"
+[ "$RC" -ne 0 ] && ok "rec -c exits non-zero on old conf" || fail "rec -c exits non-zero"
+
+# ==========================================================================
 echo
 echo "bash tests: ${PASS} passed, ${FAIL} failed"
 [ "${FAIL}" -eq 0 ]

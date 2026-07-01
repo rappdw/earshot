@@ -25,7 +25,9 @@ import tempfile
 
 import speakers as spk
 
-REMOTE_RE = re.compile(r"^REMOTE-\d+$")
+# unidentified labels: REMOTE-1, REMOTE-2, ... plus the generic "REMOTE"
+# fallback diarize assigns to segments with no turn overlap.
+REMOTE_RE = re.compile(r"^REMOTE(-\d+)?$")
 
 
 def fmt_ts(seconds):
@@ -209,11 +211,16 @@ def main():
                 if not ans:
                     break
                 mapping[label] = ans
-                if label in embeddings:
-                    sp = spk.add_sample(library, ans, embeddings[label])
-                    print(f"  learned '{ans}' ({len(sp['samples'])} sample(s) in library)", file=sys.stderr)
-                else:
+                emb = embeddings.get(label)
+                if emb is None:
                     print(f"  named '{ans}' for this transcript (no embedding to learn from)", file=sys.stderr)
+                elif library.get("dim") and len(emb) != library["dim"]:
+                    print(f"  named '{ans}' for this transcript, but NOT enrolled: embedding "
+                          f"dim {len(emb)} != library dim {library['dim']} "
+                          "(different diarization model?)", file=sys.stderr)
+                else:
+                    sp = spk.add_sample(library, ans, emb)
+                    print(f"  learned '{ans}' ({len(sp['samples'])} sample(s) in library)", file=sys.stderr)
                 break
         finally:
             if not keep_clip:

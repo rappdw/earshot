@@ -41,6 +41,19 @@ SYSTEM_PROMPT = (
 )
 
 
+def length_warning(transcript_text, backend):
+    """A warning string when the transcript may exceed the model's context, or
+    None. ~4 chars/token; local servers (ollama default ctx 8k) truncate
+    silently, which quietly drops the start of the meeting from the notes."""
+    est_tokens = len(transcript_text) // 4
+    limit = 8000 if backend == "ollama" else 16000
+    if est_tokens > limit:
+        return (f"WARNING: transcript is ~{est_tokens} tokens, which may exceed the "
+                f"{backend} model's context window; the notes may silently miss "
+                "early parts of the meeting. Consider a larger-context model.")
+    return None
+
+
 def read_transcript(meeting_dir, override):
     if override:
         with open(override, "r", encoding="utf-8") as fh:
@@ -85,7 +98,7 @@ def summarize_ollama(transcript, args):
             {"role": "user", "content": transcript},
         ],
         "stream": False,
-        "options": {"temperature": 0.2},
+        "options": {"temperature": 0.2, "num_predict": args.max_tokens},
     }
     print(f"earshot-summarize: ollama model={args.model} url={url}", file=sys.stderr)
     out = http_post_json(url, payload, {"Content-Type": "application/json"}, timeout=600)
@@ -190,6 +203,9 @@ def main():
             args.model = os.environ.get("EARSHOT_OLLAMA_MODEL", "llama3.1")
 
     transcript = read_transcript(args.meeting_dir, args.transcript)
+    warn = length_warning(transcript, args.backend)
+    if warn:
+        print(f"earshot-summarize: {warn}", file=sys.stderr)
 
     if args.backend == "claude":
         notes = summarize_claude(transcript, args)

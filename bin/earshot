@@ -40,6 +40,11 @@ usage() {
   sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
 }
 
+# Escape a string for embedding in a JSON double-quoted value.
+json_escape() {
+  printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
 # ===========================================================================
 # Audio device helpers (avfoundation)
 # ===========================================================================
@@ -371,8 +376,17 @@ cmd_offload() {
 
   local NAME RDIR SESSION
   NAME="$(basename "${DIR}")"
+  # NAME lands inside remote shell commands and a tmux session name; restrict
+  # it to safe characters (earshot-generated folders always are).
+  case "${NAME}" in
+    ""|*[!A-Za-z0-9._-]*)
+      echo "earshot offload: meeting folder name '${NAME}' contains characters unsafe" >&2
+      echo "  for remote execution (allowed: letters, digits, . _ -). Rename it first." >&2
+      exit 1 ;;
+  esac
   RDIR="${RROOT%/}/${NAME}"
-  SESSION="earshot-${NAME}"
+  # tmux session names cannot contain '.' or ':'
+  SESSION="earshot-$(printf '%s' "${NAME}" | tr '.:' '--')"
 
   # -T: never request a TTY (silences "Pseudo-terminal..." and "Connection
   # closed" noise from TTY-forcing ssh configs). LogLevel=ERROR keeps real errors.
@@ -552,6 +566,11 @@ cmd_record() {
   if [ -n "${OUT_OVERRIDE}" ]; then
     OUT_ROOT="${OUT_OVERRIDE}"
   elif [ -n "${CONTEXT}" ]; then
+    if ! declare -f earshot_load_context >/dev/null 2>&1; then
+      echo "earshot: this earshot.conf predates contexts (no earshot_load_context)." >&2
+      echo "  Refresh it with: ./install.sh --force  (your old conf is backed up)" >&2
+      exit 1
+    fi
     if ! earshot_load_context "${CONTEXT}"; then
       echo "earshot: unknown context '${CONTEXT}' (check earshot.conf)" >&2
       exit 1
@@ -704,7 +723,7 @@ cmd_record() {
   NEAR_CH="$(ffprobe -v error -show_entries stream=channels -of default=nw=1:nk=1 "${NEAR}" 2>/dev/null || echo "?")"
   cat > "${MEET_DIR}/meeting.json" <<EOF
 {
-  "title": $(printf '%s' "${TITLE:-}" | sed 's/"/\\"/g; s/^/"/; s/$/"/'),
+  "title": "$(json_escape "${TITLE:-}")",
   "profile": "${PROFILE}",
   "far_device": "${BLACKHOLE_NAME}",
   "near_device": "${MIC_NAME}",

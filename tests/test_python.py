@@ -133,6 +133,11 @@ class TestAttribute(unittest.TestCase):
         t["diarization"]["labels"] = ["Dan", "REMOTE-2"]
         self.assertEqual(attribute.unidentified_labels(t), ["REMOTE-2"])
 
+    def test_generic_remote_fallback_offered(self):
+        t = _attr_transcript()
+        t["diarization"]["labels"] = ["REMOTE", "REMOTE-2"]
+        self.assertEqual(attribute.unidentified_labels(t), ["REMOTE", "REMOTE-2"])
+
     def test_sample_prefers_turn_time_over_segment_time(self):
         # segment says 5s (whisper), turn says 100s (audio truth) -> use 100
         start, dur, _ = attribute.sample_segment(_attr_transcript(), "REMOTE-1", 8.0)
@@ -227,6 +232,25 @@ class TestSummarize(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+    def test_ollama_gets_num_predict(self):
+        srv, handler = _stub_server({"message": {"content": "notes"}})
+        try:
+            args = mock.Mock(backend="ollama", model="m",
+                             ollama_url=f"http://127.0.0.1:{srv.server_port}",
+                             max_tokens=77)
+            summarize.summarize_ollama("t", args)
+            self.assertEqual(handler.last_request["options"]["num_predict"], 77)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_length_warning(self):
+        self.assertIsNone(summarize.length_warning("short", "ollama"))
+        long_text = "x" * (9000 * 4)
+        self.assertIn("context window", summarize.length_warning(long_text, "ollama"))
+        # vllm has more headroom before the warning fires
+        self.assertIsNone(summarize.length_warning(long_text, "vllm"))
 
     def test_claude_backend_requires_key(self):
         env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}

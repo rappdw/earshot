@@ -249,9 +249,16 @@ def main():
     relabel(transcript, turns, raw_to_final)
 
     # Store embeddings keyed by FINAL label so enroll can read them back.
+    # Two clusters can identify as the same person; keep the first embedding
+    # and say so rather than silently overwriting.
     final_embeddings = {}
     for raw, emb in raw_embeddings.items():
-        final_embeddings[raw_to_final.get(raw, raw)] = emb
+        final = raw_to_final.get(raw, raw)
+        if final in final_embeddings:
+            print(f"  note: two clusters both resolved to '{final}'; "
+                  "keeping the first cluster's embedding.", file=sys.stderr)
+            continue
+        final_embeddings[final] = emb
 
     final_labels = sorted(set(raw_to_final.values()))
     transcript["diarization"] = {

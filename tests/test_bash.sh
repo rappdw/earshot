@@ -68,7 +68,7 @@ EARSHOT_SPEAKERS_BUSINESS="${WORK}/biz.json"
 EARSHOT_SPEAKERS_PERSONAL="${WORK}/per.json"
 EARSHOT_OUT_ROOT="${WORK}/meet"
 earshot_load_context() { case "\$1" in business) CONTEXT_OUT="\$EARSHOT_OUT_ROOT_BUSINESS"; CONTEXT_SPEAKERS="\$EARSHOT_SPEAKERS_BUSINESS";; personal) CONTEXT_OUT="\$EARSHOT_OUT_ROOT_PERSONAL"; CONTEXT_SPEAKERS="\$EARSHOT_SPEAKERS_PERSONAL";; *) return 1;; esac; }
-earshot_load_profile() { case "\$1" in obsbot) MIC_NAME="OBSBOT Meet Microphone|OBSBOT Meet 4K Microphone";; only4k) MIC_NAME="Not Present Mic|OBSBOT Meet 4K Microphone";; *) return 1;; esac; }
+earshot_load_profile() { case "\$1" in obsbot) MIC_NAME="OBSBOT Meet Microphone|OBSBOT Meet 4K Microphone";; only4k) MIC_NAME="Not Present Mic|OBSBOT Meet 4K Microphone";; ghost) MIC_NAME="Ghost Mic";; *) return 1;; esac; }
 EOF
 export EARSHOT_CONF="${CONF}"
 
@@ -94,6 +94,24 @@ check "falls through to next candidate" "near 'OBSBOT Meet 4K Microphone' (index
 OUT="$(EARSHOT_CONF="${CONF}" "${EARSHOT}" rec -p obsbot -t t3 -o "${WORK}/rec3" 2>&1 </dev/null || true)"
 J="$(cat "${WORK}"/rec3/*/meeting.json 2>/dev/null)"
 check "meeting.json records the resolved name, not the list" '"near_device": "OBSBOT Meet Microphone"' "$J"
+
+# ==========================================================================
+echo "[rec] interactive device pick when the configured mic is absent"
+printf '4\n' > "${WORK}/tty-pick"
+OUT="$(EARSHOT_TTY="${WORK}/tty-pick" "${EARSHOT}" rec -p ghost -t t4 -o "${WORK}/rec4" 2>&1 </dev/null || true)"
+check "prompted with the device list" "Select a device number" "$OUT"
+check "picked device used for the run" "near 'OBSBOT Meet 4K Microphone' (index 4)" "$OUT"
+check "permanence hint shows profile edit" 'MIC_NAME="Ghost Mic|OBSBOT Meet 4K Microphone"' "$OUT"
+
+printf '\n' > "${WORK}/tty-pick"
+OUT="$(EARSHOT_TTY="${WORK}/tty-pick" "${EARSHOT}" rec -p ghost -t t5 -o "${WORK}/rec5" 2>&1 </dev/null)"; RC=$?
+check "empty input aborts to the clean error" "no mic from profile 'ghost'" "$OUT"
+[ "$RC" -ne 0 ] && ok "abort exits non-zero" || fail "abort exits non-zero"
+
+printf '99\n' > "${WORK}/tty-pick"
+OUT="$(EARSHOT_TTY="${WORK}/tty-pick" "${EARSHOT}" rec -p ghost -t t6 -o "${WORK}/rec6" 2>&1 </dev/null)"; RC=$?
+check "invalid index rejected" "not a listed device index" "$OUT"
+[ "$RC" -ne 0 ] && ok "invalid index exits non-zero" || fail "invalid index exits non-zero"
 
 # ==========================================================================
 echo "[offload] default steps, env forwarding, notes pull"

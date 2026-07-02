@@ -109,6 +109,31 @@ av_print_list() {
   done
 }
 
+# Interactive fallback when a configured device is absent: show the list, let
+# the user pick an index for this run. Sets RESOLVED_IDX/RESOLVED_NAME.
+# Reads from the terminal (EARSHOT_TTY overrides for tests); returns 1 when
+# non-interactive, aborted (empty input), or given an invalid index.
+av_pick_interactive() {
+  local role="$1" tty="${EARSHOT_TTY:-/dev/tty}" choice idx name
+  RESOLVED_IDX="" RESOLVED_NAME=""
+  [ -r "${tty}" ] || return 1
+  {
+    echo "earshot: configured device for ${role} not found."
+    av_print_list
+  } >&2
+  printf 'Select a device number for %s (Enter to abort): ' "${role}" >&2
+  IFS= read -r choice < "${tty}" || return 1
+  [ -z "${choice}" ] && return 1
+  while IFS=$'\t' read -r idx name; do
+    if [ "${idx}" = "${choice}" ]; then
+      RESOLVED_IDX="${idx}" RESOLVED_NAME="${name}"
+      return 0
+    fi
+  done < <(_av_audio_section)
+  echo "earshot: '${choice}' is not a listed device index." >&2
+  return 1
+}
+
 # ===========================================================================
 # Config (only needed for capture)
 # ===========================================================================
@@ -546,15 +571,23 @@ cmd_record() {
 
   local FAR_IDX NEAR_IDX NEAR_NAME
   if ! av_resolve_first "${BLACKHOLE_NAME}"; then
-    echo "earshot: call-audio device '${BLACKHOLE_NAME}' is not present." >&2
-    av_print_list >&2
-    exit 1
+    if ! av_pick_interactive "call audio (${BLACKHOLE_NAME})"; then
+      echo "earshot: call-audio device '${BLACKHOLE_NAME}' is not present." >&2
+      av_print_list >&2
+      exit 1
+    fi
   fi
   FAR_IDX="${RESOLVED_IDX}"
   if ! av_resolve_first "${MIC_NAME}"; then
-    echo "earshot: no mic from profile '${PROFILE}' is present (tried: ${MIC_NAME})." >&2
-    av_print_list >&2
-    exit 1
+    if av_pick_interactive "the microphone (profile '${PROFILE}')"; then
+      echo "earshot: using '${RESOLVED_NAME}' for this run. To make it permanent, add it" >&2
+      echo "  to the '${PROFILE}' profile in ~/.config/earshot/earshot.conf, e.g." >&2
+      echo "  MIC_NAME=\"${MIC_NAME}|${RESOLVED_NAME}\"" >&2
+    else
+      echo "earshot: no mic from profile '${PROFILE}' is present (tried: ${MIC_NAME})." >&2
+      av_print_list >&2
+      exit 1
+    fi
   fi
   NEAR_IDX="${RESOLVED_IDX}" NEAR_NAME="${RESOLVED_NAME}"
 

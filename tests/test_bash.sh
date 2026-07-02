@@ -29,6 +29,7 @@ cat >&2 <<'DEV'
 [AVFoundation indev @ 0x1] [1] Dan's iPhone Microphone
 [AVFoundation indev @ 0x1] [2] BlackHole 2ch
 [AVFoundation indev @ 0x1] [3] OBSBOT Meet Microphone
+[AVFoundation indev @ 0x1] [4] OBSBOT Meet 4K Microphone
 DEV
 exit 1
 EOF
@@ -67,7 +68,7 @@ EARSHOT_SPEAKERS_BUSINESS="${WORK}/biz.json"
 EARSHOT_SPEAKERS_PERSONAL="${WORK}/per.json"
 EARSHOT_OUT_ROOT="${WORK}/meet"
 earshot_load_context() { case "\$1" in business) CONTEXT_OUT="\$EARSHOT_OUT_ROOT_BUSINESS"; CONTEXT_SPEAKERS="\$EARSHOT_SPEAKERS_BUSINESS";; personal) CONTEXT_OUT="\$EARSHOT_OUT_ROOT_PERSONAL"; CONTEXT_SPEAKERS="\$EARSHOT_SPEAKERS_PERSONAL";; *) return 1;; esac; }
-earshot_load_profile() { case "\$1" in obsbot) MIC_NAME="OBSBOT Meet Microphone";; *) return 1;; esac; }
+earshot_load_profile() { case "\$1" in obsbot) MIC_NAME="OBSBOT Meet Microphone|OBSBOT Meet 4K Microphone";; only4k) MIC_NAME="Not Present Mic|OBSBOT Meet 4K Microphone";; *) return 1;; esac; }
 EOF
 export EARSHOT_CONF="${CONF}"
 
@@ -81,6 +82,18 @@ echo "[devices] parses stubbed avfoundation list"
 OUT="$("${EARSHOT}" devices 2>&1)"
 check "lists BlackHole with index" "2   BlackHole 2ch" "$OUT"
 check "lists OBSBOT" "3   OBSBOT Meet Microphone" "$OUT"
+
+# ==========================================================================
+echo "[rec] profile mic candidates resolve in order (multi-model support)"
+# stub ffmpeg exits immediately, so rec finishes fast with empty-wav warnings;
+# we only assert the device resolution lines.
+OUT="$("${EARSHOT}" rec -p obsbot -t t1 -o "${WORK}/rec1" 2>&1 </dev/null || true)"
+check "first candidate wins when present" "near 'OBSBOT Meet Microphone' (index 3)" "$OUT"
+OUT="$("${EARSHOT}" rec -p only4k -t t2 -o "${WORK}/rec2" 2>&1 </dev/null || true)"
+check "falls through to next candidate" "near 'OBSBOT Meet 4K Microphone' (index 4)" "$OUT"
+OUT="$(EARSHOT_CONF="${CONF}" "${EARSHOT}" rec -p obsbot -t t3 -o "${WORK}/rec3" 2>&1 </dev/null || true)"
+J="$(cat "${WORK}"/rec3/*/meeting.json 2>/dev/null)"
+check "meeting.json records the resolved name, not the list" '"near_device": "OBSBOT Meet Microphone"' "$J"
 
 # ==========================================================================
 echo "[offload] default steps, env forwarding, notes pull"

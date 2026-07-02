@@ -86,6 +86,22 @@ av_resolve() {
   return 1
 }
 
+# Resolve the first present device from a '|'-separated candidate list (device
+# names differ across models of the same product, e.g. "OBSBOT Meet Microphone"
+# vs "OBSBOT Meet 4K Microphone"). Sets RESOLVED_IDX and RESOLVED_NAME.
+av_resolve_first() {
+  local names="$1" name idx
+  RESOLVED_IDX="" RESOLVED_NAME=""
+  local IFS='|'
+  for name in $names; do
+    if idx="$(av_resolve "$name")"; then
+      RESOLVED_IDX="$idx" RESOLVED_NAME="$name"
+      return 0
+    fi
+  done
+  return 1
+}
+
 av_print_list() {
   echo "Current audio input devices (index  name):"
   _av_audio_section | while IFS=$'\t' read -r idx name; do
@@ -528,19 +544,19 @@ cmd_record() {
     exit 1
   fi
 
-  local FAR_IDX NEAR_IDX
-  FAR_IDX="$(av_resolve "${BLACKHOLE_NAME}" || true)"
-  if [ -z "${FAR_IDX}" ]; then
+  local FAR_IDX NEAR_IDX NEAR_NAME
+  if ! av_resolve_first "${BLACKHOLE_NAME}"; then
     echo "earshot: call-audio device '${BLACKHOLE_NAME}' is not present." >&2
     av_print_list >&2
     exit 1
   fi
-  NEAR_IDX="$(av_resolve "${MIC_NAME}" || true)"
-  if [ -z "${NEAR_IDX}" ]; then
-    echo "earshot: mic device '${MIC_NAME}' (profile '${PROFILE}') is not present." >&2
+  FAR_IDX="${RESOLVED_IDX}"
+  if ! av_resolve_first "${MIC_NAME}"; then
+    echo "earshot: no mic from profile '${PROFILE}' is present (tried: ${MIC_NAME})." >&2
     av_print_list >&2
     exit 1
   fi
+  NEAR_IDX="${RESOLVED_IDX}" NEAR_NAME="${RESOLVED_NAME}"
 
   local STAMP SLUG MEET_DIR
   STAMP="$(date +%Y-%m-%d_%H%M%S)"
@@ -566,7 +582,7 @@ cmd_record() {
 
   echo "earshot: context=${CONTEXT:-none} profile=${PROFILE} rate=${RATE}"
   echo "earshot: far  '${BLACKHOLE_NAME}' (index ${FAR_IDX}) -> far_remote.wav"
-  echo "earshot: near '${MIC_NAME}' (index ${NEAR_IDX}) -> near_me.wav"
+  echo "earshot: near '${NEAR_NAME}' (index ${NEAR_IDX}) -> near_me.wav"
   echo "earshot: writing to ${MEET_DIR}"
 
   local START_TS END_TS
@@ -663,7 +679,7 @@ cmd_record() {
   "title": "$(json_escape "${TITLE:-}")",
   "profile": "${PROFILE}",
   "far_device": "${BLACKHOLE_NAME}",
-  "near_device": "${MIC_NAME}",
+  "near_device": "${NEAR_NAME}",
   "sample_rate": ${RATE},
   "far_channels": "${FAR_CH}",
   "near_channels": "${NEAR_CH}",

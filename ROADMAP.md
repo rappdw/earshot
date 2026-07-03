@@ -15,6 +15,17 @@ needing real-world data (timing) ships its tooling early.
 | F | Bash maintainability | 4 duplicate python-runners; line-number `usage()` broke 3× | suite green + dispatch smoke |
 | G | Container build smoke | Catch dependency-API breaks at image build, not first diarize | Dockerfile check; proven on next Spark rebuild |
 
-Deferred (tracked, not scheduled): config defaults-in-code (eliminate the
-stale-config bug class rather than guarding it), voiceprint handling policy
-(`--rm-remote` default?), offload poll timeout, whisper.cpp backend.
+## Review 2 (2026-07-02) — all executed
+
+| Chunk | Landed |
+|---|---|
+| Bugs 1–5 | attribute offers generic REMOTE; speakers.json atomic + 0600 + .bak; offload launch guard cleans secrets; manual-name drop warning; every nit (rec -y, usage fallback, -c guard, collect w/o audio, per-channel languages, Ctrl-C reason, single-enumeration picker, macOS gate on release workflow) |
+| Config | defaults-in-code; conf is pure overrides; missing/stale conf fully functional |
+| Contract | transcript.json schema:1 + languages; .wav/.flac fallback everywhere; EARSHOT_PROMPT_FILE glossary; EARSHOT_MY_NAME; diarize inline alignment check |
+| Lifecycle | monitor opt-in; `earshot clean` (FLAC/purge, dry-run default); `earshot list`; `earshot grep` |
+| Glue | `rec --then` / EARSHOT_AFTER_REC auto-pipeline; `earshot process`; macOS notifications |
+
+Deferred (tracked, not scheduled): auto-detect call start (resident watcher —
+the last Stage-6 item, big and standalone), voiceprint retention policy
+(`--rm-remote` default?), offload poll timeout, whisper.cpp backend, splitting
+cmd_record/cmd_offload out of bin/earshot when the next big feature lands.

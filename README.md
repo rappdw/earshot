@@ -105,15 +105,36 @@ earshot rec -c personal -t "Mom"      # personal context, titled
 earshot transcribe DIR                # faster-whisper -> transcript.json + .md
 earshot diarize DIR                   # split REMOTE into speakers, attribute names
 earshot summarize DIR                 # write notes.md (local Ollama by default)
+earshot process DIR --summarize       # transcribe -> diarize -> notes, locally
+earshot offload DIR                   # the same pipeline on the Spark over SSH
+earshot attribute DIR                 # name unknown voices by ear, learn them
 earshot enroll Dan --from DIR --speaker REMOTE-1   # teach a voice from a meeting
 earshot speakers list                 # who's enrolled
-earshot offload DIR                   # transcribe + diarize on the Spark over SSH
+earshot list                          # pipeline status of recent meetings
+earshot grep "kong migration"         # search every transcript
+earshot clean --apply                 # FLAC-compress old audio (dry-run w/o --apply)
+earshot timing DIR                    # transcript-vs-audio alignment check
 earshot help
 ```
 
 A recording stops on **Enter**, on **Ctrl-C**, or **automatically** after a
 sustained silence on the call channel (a meeting that has ended). See
 `earshot rec -h` and the config for the auto-stop knobs.
+
+**Auto-pipeline:** `earshot rec --then "offload --summarize"` (or
+`EARSHOT_AFTER_REC` in the config) runs any earshot command on the meeting the
+moment the recording stops — record, walk away, get notified when the notes
+land.
+
+**Accuracy and identity:** set `EARSHOT_PROMPT_FILE` to a glossary of your
+product names, acronyms, and people (biggest accuracy lever for jargon), and
+`EARSHOT_MY_NAME` to label your own channel with your name instead of `YOU`.
+Both apply locally and through offload.
+
+**Disk:** raw capture is ~700MB per meeting-hour. The stereo monitor copy is
+off by default (`--monitor` to enable), and `earshot clean` FLAC-compresses or
+purges audio older than N days (dry-run unless `--apply`; transcripts are
+always kept, and every tool reads `.flac` transparently).
 
 ### Speaker identification
 

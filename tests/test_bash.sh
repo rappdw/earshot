@@ -22,7 +22,13 @@ check_not() {
 STUB="${WORK}/stub"; mkdir -p "${STUB}"
 cat > "${STUB}/ffmpeg" <<'EOF'
 #!/usr/bin/env bash
-# device-listing stub: emit a canned avfoundation device list on stderr
+# record stub: for a capture invocation, write bytes to the output wav and
+# exit 0 so rec's happy path is exercisable
+case "$*" in
+  *avfoundation*pcm_s16le*)
+    out="${!#}"; head -c 4096 /dev/zero > "$out"; exit 0 ;;
+esac
+# otherwise: device-listing stub, canned avfoundation list on stderr
 cat >&2 <<'DEV'
 [AVFoundation indev @ 0x1] AVFoundation audio devices:
 [AVFoundation indev @ 0x1] [0] Aggregate Macbook Air
@@ -95,6 +101,14 @@ check "falls through to next candidate" "near 'OBSBOT Meet 4K Microphone' (index
 OUT="$(EARSHOT_CONF="${CONF}" "${EARSHOT}" rec -p obsbot -t t3 -o "${WORK}/rec3" 2>&1 </dev/null || true)"
 J="$(cat "${WORK}"/rec3/*/meeting.json 2>/dev/null)"
 check "meeting.json records the resolved name, not the list" '"near_device": "OBSBOT Meet Microphone"' "$J"
+check "recording succeeded via stub" "earshot: done." "$OUT"
+check "monitor is off by default (json null)" '"monitor_stereo": null' "$J"
+[ ! -f "${WORK}"/rec3/*/monitor_stereo.wav ] && ok "no monitor file by default" || fail "no monitor file by default"
+
+echo "[rec] --then runs the follow-up earshot command on the meeting dir"
+OUT="$("${EARSHOT}" rec -p obsbot -t t8 -o "${WORK}/rec8" --then "devices" 2>&1 </dev/null || true)"
+check "announces follow-up" "follow-up -> earshot devices" "$OUT"
+check "follow-up executed after recording" "Current audio input devices" "$OUT"
 
 # ==========================================================================
 echo "[rec] interactive device pick when the configured mic is absent"
@@ -232,6 +246,29 @@ check_not "no conf-missing error" "no earshot.conf found" "$OUT"
 check "built-in obsbot profile resolves" "near 'OBSBOT Meet Microphone'" "$OUT"
 OUT="$(EARSHOT_CONF="${WORK}/does-not-exist.conf" "${EARSHOT}" speakers -c personal list 2>&1)"
 check "built-in personal context library" "speakers-personal.json" "$OUT"
+
+# ==========================================================================
+echo "[process] local pipeline chains transcribe -> diarize -> summarize"
+FV="${WORK}/fakevenv"; mkdir -p "${FV}/bin"
+cat > "${FV}/bin/python" <<'EOF'
+#!/bin/sh
+# fake venv python: log tool invocations, succeed on import checks
+for a in "$@"; do case "$a" in *.py) echo "PY:$(basename "$a") $*";; esac; done
+exit 0
+EOF
+chmod +x "${FV}/bin/python"
+OUT="$(EARSHOT_VENV="${FV}" "${EARSHOT}" process "${M}" --summarize \
+      --tx-args "--model small" --sum-args "--backend vllm --model x" 2>&1)"; RC=$?
+[ "$RC" -eq 0 ] && ok "process exits 0" || fail "process exits 0 ($OUT)"
+check "transcribe ran with args" "PY:transcribe.py" "$OUT"
+check "tx-args passed" "--model small" "$OUT"
+check "diarize ran" "PY:diarize.py" "$OUT"
+check "summarize ran with args" "--backend vllm" "$OUT"
+# order: transcribe before diarize before summarize
+T=$(printf '%s\n' "$OUT" | grep -n "PY:transcribe.py" | head -1 | cut -d: -f1)
+D=$(printf '%s\n' "$OUT" | grep -n "PY:diarize.py" | head -1 | cut -d: -f1)
+S=$(printf '%s\n' "$OUT" | grep -n "PY:summarize.py" | head -1 | cut -d: -f1)
+[ "$T" -lt "$D" ] && [ "$D" -lt "$S" ] && ok "pipeline order correct" || fail "pipeline order correct"
 
 # ==========================================================================
 echo "[dispatch] every python subcommand reaches its tool (not bash breakage)"

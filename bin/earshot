@@ -15,6 +15,7 @@
 #   earshot enroll NAME ...     add a voice to the speaker library
 #   earshot speakers [list|remove|rename] ...   manage the speaker library
 #   earshot offload DIR ...     run transcribe/diarize on the DGX Spark over SSH
+#   earshot process DIR ...     the same pipeline, locally on this machine
 #   earshot help                this help
 #
 # rec options:
@@ -26,6 +27,9 @@
 #   --auto-stop N    stop after N sec of call-audio silence (default from config)
 #   --no-auto-stop   disable silence auto-stop for this recording
 #   --max-min N      hard cap recording length in minutes (0 = no cap)
+#   --monitor        also write monitor_stereo.wav (off by default; doubles disk)
+#   --then "CMD..."  run `earshot CMD... <meeting-dir>` when the recording ends
+#                    (or set EARSHOT_AFTER_REC; "none" skips a conf-set one)
 #
 # transcribe/diarize options: run `earshot transcribe -h` / `earshot diarize -h`.
 # diarize/enroll/speakers/offload take -c/--context (business|personal) to pick
@@ -62,6 +66,13 @@ need_val() {  # need_val <flag> <value...>
 # Escape a string for embedding in a JSON double-quoted value.
 json_escape() {
   printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# macOS notification for long-running completions; silent no-op elsewhere.
+notify() {  # notify <title> <message>
+  command -v osascript >/dev/null 2>&1 || return 0
+  osascript -e "display notification \"$(json_escape "$2")\" with title \"$(json_escape "$1")\"" \
+    >/dev/null 2>&1 || true
 }
 
 # ===========================================================================
@@ -338,6 +349,49 @@ cmd_devices() {
   av_print_list
 }
 
+# Local pipeline: transcribe -> diarize [-> summarize], same shape as offload
+# but on this machine. Each step is a child invocation of this script.
+cmd_process() {
+  local DO_SUM=0 TX_ARGS="" DZ_ARGS="" SUM_ARGS="" DIR="" CTX=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --summarize)  DO_SUM=1; shift ;;
+      --tx-args)    need_val "$1" "${2:-}"; TX_ARGS="$2"; shift 2 ;;
+      --dz-args)    need_val "$1" "${2:-}"; DZ_ARGS="$2"; shift 2 ;;
+      --sum-args)   need_val "$1" "${2:-}"; SUM_ARGS="$2"; shift 2 ;;
+      -c|--context) need_val "$1" "${2:-}"; CTX="$2"; shift 2 ;;
+      -h|--help)
+        echo "usage: earshot process DIR [--summarize] [-c CONTEXT]"
+        echo "                          [--tx-args ...] [--dz-args ...] [--sum-args ...]"
+        echo "Runs transcribe -> diarize (-> summarize) locally on the meeting."
+        exit 0 ;;
+      -*) echo "earshot process: unknown option: $1" >&2; exit 1 ;;
+      *)  DIR="$1"; shift ;;
+    esac
+  done
+  if [ -z "${DIR}" ] || [ ! -d "${DIR}" ]; then
+    echo "earshot process: pass a meeting directory" >&2; exit 1
+  fi
+  local name
+  name="$(basename "${DIR}")"
+  # shellcheck disable=SC2086
+  if ! "$0" transcribe "${DIR}" ${TX_ARGS}; then
+    notify "earshot" "process FAILED (transcribe): ${name}"; exit 1
+  fi
+  # shellcheck disable=SC2086
+  if ! "$0" diarize ${CTX:+-c "${CTX}"} "${DIR}" ${DZ_ARGS}; then
+    notify "earshot" "process FAILED (diarize): ${name}"; exit 1
+  fi
+  if [ "${DO_SUM}" -eq 1 ]; then
+    # shellcheck disable=SC2086
+    if ! "$0" summarize "${DIR}" ${SUM_ARGS}; then
+      notify "earshot" "process FAILED (summarize): ${name}"; exit 1
+    fi
+  fi
+  notify "earshot" "process done: ${name}"
+  echo "earshot process: done -> ${DIR}"
+}
+
 # list/grep/clean operate across the configured meeting roots.
 run_meetings() {
   local sub="$1"; shift
@@ -572,6 +626,7 @@ EOF
   local rc
   rc="$(${rsh} "${HOST}" "cat '${RDIR}/.status' 2>/dev/null" || echo 1)"
   if [ "${rc}" != "0" ]; then
+    notify "earshot offload" "FAILED: ${NAME}"
     echo "earshot offload: remote job failed (exit ${rc}). Last log lines:" >&2
     ${rsh} "${HOST}" "tail -n 15 '${RDIR}/run.log' 2>/dev/null" >&2 || true
     exit 1
@@ -590,6 +645,7 @@ EOF
     echo "earshot offload: removed remote ${RDIR}"
   fi
 
+  notify "earshot offload" "done: ${NAME}"
   echo "earshot offload: done -> ${DIR}/transcript.md"
 }
 
@@ -608,6 +664,7 @@ cmd_record() {
   local SILENCE_DB="${EARSHOT_SILENCE_DB:--50dB}"
   local MAX_MIN="${EARSHOT_MAX_MINUTES:-0}"
   local MONITOR="${EARSHOT_MONITOR:-0}"
+  local AFTER="${EARSHOT_AFTER_REC:-}"
   local TITLE=""
 
   while [ "$#" -gt 0 ]; do
@@ -621,6 +678,7 @@ cmd_record() {
       --no-auto-stop) AUTOSTOP=0;   shift ;;
       --max-min)      MAX_MIN="$2"; shift 2 ;;
       --monitor)      MONITOR=1;    shift ;;
+      --then)         need_val "$1" "${2:-}"; AFTER="$2"; shift 2 ;;
       -h|--help)      usage; exit 0 ;;
       *) echo "earshot rec: unknown argument: $1" >&2; exit 1 ;;
     esac
@@ -822,6 +880,15 @@ EOF
   echo "  near_me.wav        (your mic)"
   [ -f "${MON}" ] && echo "  monitor_stereo.wav (L=remote, R=you) for a quick listen"
   echo "  -> ${MEET_DIR}"
+
+  # Auto-pipeline: run a follow-up earshot command on the finished meeting
+  # (--then "offload --summarize" or EARSHOT_AFTER_REC in the conf).
+  # "none" disables a conf-set follow-up for this run.
+  if [ -n "${AFTER}" ] && [ "${AFTER}" != "none" ]; then
+    echo "earshot: follow-up -> earshot ${AFTER} ${MEET_DIR}"
+    eval "set -- ${AFTER}"
+    exec "$0" "$@" "${MEET_DIR}"
+  fi
 }
 
 # ===========================================================================
@@ -841,6 +908,7 @@ case "${1:-}" in
   enroll)         shift; run_speakers enroll "$@" ;;
   speakers|spk)   shift; run_speakers "$@" ;;
   offload)        shift; cmd_offload "$@" ;;
+  process)        shift; cmd_process "$@" ;;
   -h|--help|help) usage ;;
   "")             usage; exit 1 ;;
   *) echo "earshot: unknown subcommand: $1" >&2; echo "Run 'earshot help' for usage." >&2; exit 1 ;;

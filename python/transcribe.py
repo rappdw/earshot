@@ -93,6 +93,16 @@ def transcribe_channel(model, path, speaker, channel, args, prompt):
     return out, info
 
 
+def find_audio(d, base):
+    """Channel audio path: .wav, or .flac once `earshot clean` compressed it.
+    (Same helper in diarize.py/attribute.py - keep in sync.)"""
+    for ext in (".wav", ".flac"):
+        p = os.path.join(d, base + ext)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
 def resolve_inputs(args):
     """Return a list of (path, speaker, channel) to transcribe."""
     jobs = []
@@ -103,14 +113,15 @@ def resolve_inputs(args):
     d = args.meeting_dir
     if not d or not os.path.isdir(d):
         sys.exit("error: pass a meeting directory or --file PATH")
-    near = os.path.join(d, "near_me.wav")
-    far = os.path.join(d, "far_remote.wav")
-    if os.path.isfile(near):
-        jobs.append((near, "YOU", "near"))
-    if os.path.isfile(far):
+    near = find_audio(d, "near_me")
+    far = find_audio(d, "far_remote")
+    me = os.environ.get("EARSHOT_MY_NAME", "").strip() or "YOU"
+    if near:
+        jobs.append((near, me, "near"))
+    if far:
         jobs.append((far, "REMOTE", "far"))
     if not jobs:
-        sys.exit(f"error: no near_me.wav or far_remote.wav found in {d}")
+        sys.exit(f"error: no near_me/far_remote audio (.wav/.flac) found in {d}")
     return jobs
 
 
@@ -127,6 +138,7 @@ def write_outputs(args, all_segments, meta):
             pass
 
     js = {
+        "schema": 1,
         "title": title,
         "model": args.model,
         "device": meta["device"],
@@ -166,7 +178,9 @@ def main():
     ap.add_argument("--language", default=None, help="force a language code (e.g. en); default autodetect")
     ap.add_argument("--beam-size", dest="beam_size", type=int, default=5)
     ap.add_argument("--prompt", help="initial prompt to bias jargon/acronyms/names")
-    ap.add_argument("--prompt-file", dest="prompt_file", help="file whose contents bias decoding")
+    ap.add_argument("--prompt-file", dest="prompt_file",
+                    default=os.environ.get("EARSHOT_PROMPT_FILE") or None,
+                    help="glossary file to bias decoding (default: $EARSHOT_PROMPT_FILE)")
     args = ap.parse_args()
 
     from faster_whisper import WhisperModel
@@ -187,11 +201,12 @@ def main():
         segs, info = transcribe_channel(model, path, speaker, channel, args, prompt)
         languages[channel] = info.language
         all_segments.extend(segs)
+        print(f"  {len(segs)} segments (lang={info.language} "
+              f"p={info.language_probability:.2f})", file=sys.stderr)
+
     # primary language: forced > the far channel (most content) > whatever ran
     detected_lang = args.language or languages.get("far") \
         or next(iter(languages.values()), "")
-        print(f"  {len(segs)} segments (lang={info.language} "
-              f"p={info.language_probability:.2f})", file=sys.stderr)
 
     all_segments.sort(key=lambda s: (s["start"] if s["start"] is not None else 0.0))
 

@@ -117,12 +117,17 @@ check "invalid index rejected" "not a listed device index" "$OUT"
 # ==========================================================================
 echo "[offload] default steps, env forwarding, notes pull"
 export TEST_LOG="${WORK}/t1.log"; : > "${TEST_LOG}"
-HF_TOKEN=hf_TEST ANTHROPIC_API_KEY=sk_TEST "${EARSHOT}" offload "${M}" --poll 1 >/dev/null 2>&1
+printf 'Satori Kong Twingate\n' > "${WORK}/glossary.txt"
+HF_TOKEN=hf_TEST ANTHROPIC_API_KEY=sk_TEST EARSHOT_MY_NAME="Dan T" \
+  EARSHOT_PROMPT_FILE="${WORK}/glossary.txt" \
+  "${EARSHOT}" offload "${M}" --poll 1 >/dev/null 2>&1
 RUN="$(cat "${TEST_LOG}.run.sh" 2>/dev/null)"
 check "default includes transcribe" "earshot-container transcribe . --device auto" "$RUN"
 check "default includes diarize" "earshot-container diarize . --device auto" "$RUN"
 check_not "default excludes summarize" "summarize" "$RUN"
 check "HF_TOKEN forwarded" "export HF_TOKEN='hf_TEST'" "$RUN"
+check "MY_NAME forwarded" "export EARSHOT_MY_NAME='Dan T'" "$RUN"
+check "glossary pushed + wired" "export EARSHOT_PROMPT_FILE=glossary.txt" "$RUN"
 check "speaker lib env set for diarize" "export EARSHOT_SPEAKERS=speakers.json" "$RUN"
 check "exit code captured" 'PIPESTATUS[0]' "$RUN"
 LOG="$(cat "${TEST_LOG}")"

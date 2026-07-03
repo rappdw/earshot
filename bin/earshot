@@ -289,6 +289,8 @@ parse_ctx() {
 }
 
 cmd_transcribe() {
+  load_config
+  export EARSHOT_PROMPT_FILE EARSHOT_MY_NAME
   run_tool transcribe.py venv "$@"
 }
 
@@ -442,7 +444,8 @@ cmd_offload() {
     # push inputs
     ${rsh} "${HOST}" "mkdir -p '${RDIR}'"
     local pushlist=() f
-    for f in far_remote.wav near_me.wav meeting.json transcript.json; do
+    for f in far_remote.wav far_remote.flac near_me.wav near_me.flac \
+             meeting.json transcript.json; do
       [ -f "${DIR}/${f}" ] && pushlist+=("${DIR}/${f}")
     done
     echo "earshot offload: pushing audio..."
@@ -468,13 +471,20 @@ cmd_offload() {
     fi
 
     # build the remote pipeline (run from inside RDIR; '.' is the meeting dir)
-    local parts="" tokenline="" apikeyline="" speakersline=""
+    local parts="" tokenline="" apikeyline="" speakersline="" promptline="" nameline=""
     # forward HF_TOKEN for both steps: transcribe downloads the Whisper model
     # from the HF Hub too, and warns / rate-limits without a token.
     [ -n "${HF_TOKEN:-}" ] && tokenline="export HF_TOKEN='${HF_TOKEN}'"
     # forward ANTHROPIC_API_KEY in case summarize is run with --backend claude.
     [ -n "${ANTHROPIC_API_KEY:-}" ] && apikeyline="export ANTHROPIC_API_KEY='${ANTHROPIC_API_KEY}'"
+    # your own-channel label travels with the job
+    [ -n "${EARSHOT_MY_NAME:-}" ] && nameline="export EARSHOT_MY_NAME='${EARSHOT_MY_NAME}'"
     if [ "${DO_TX}" -eq 1 ]; then
+      # push the glossary so remote transcription gets the same jargon biasing
+      if [ -n "${EARSHOT_PROMPT_FILE:-}" ] && [ -f "${EARSHOT_PROMPT_FILE}" ]; then
+        rsync -a -e "${rsh}" "${EARSHOT_PROMPT_FILE}" "${HOST}:${RDIR}/glossary.txt"
+        promptline="export EARSHOT_PROMPT_FILE=glossary.txt"
+      fi
       parts="${RCMD} transcribe . --device ${DEVICE} ${TX_ARGS}"
     fi
     if [ "${DO_DZ}" -eq 1 ]; then
@@ -500,6 +510,8 @@ cd "\$(dirname "\$0")" || exit 1
 rm -f -- "\$0" .status
 ${tokenline}
 ${apikeyline}
+${nameline}
+${promptline}
 ${speakersline}
 ( ${parts} ) 2>&1 | tee run.log
 echo "\${PIPESTATUS[0]}" > .status

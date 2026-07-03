@@ -168,6 +168,31 @@ def best_raw_speaker(seg_start, seg_end, turns):
     return best_lab
 
 
+def find_audio(d, base):
+    """Channel audio path: .wav, or .flac once `earshot clean` compressed it.
+    (Same helper in transcribe.py/attribute.py - keep in sync.)"""
+    for ext in (".wav", ".flac"):
+        p = os.path.join(d, base + ext)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def alignment_note(transcript):
+    """One-line Whisper-vs-pyannote alignment sanity check (see timing.py),
+    or None when it can't be computed. Never raises."""
+    try:
+        import timing
+        r = timing.analyze(transcript)
+        note = (f"alignment: shift {r['shift']:+.2f}s, "
+                f"residual {r['residual_weak_pct']:.0f}%")
+        if abs(r["shift"]) >= 1.0 or r["residual_weak_pct"] >= 20:
+            return note + "  (WARNING: run `earshot timing` - speaker labels may be off)"
+        return note + "  (ok)"
+    except BaseException:
+        return None
+
+
 def dropped_manual_names(prev_identification, new_labels):
     """Names the user assigned by hand (attribute) that a fresh diarize run
     will not reproduce (their embedding never made it into the library)."""
@@ -219,7 +244,7 @@ def main():
     args = ap.parse_args()
 
     d = args.meeting_dir
-    far = args.far or (os.path.join(d, "far_remote.wav") if d else None)
+    far = args.far or (find_audio(d, "far_remote") if d else None)
     tpath = args.transcript or (os.path.join(d, "transcript.json") if d else None)
 
     if not far or not os.path.isfile(far):
@@ -301,6 +326,9 @@ def main():
         for lab, info in id_report.items():
             tag = info["matched"] or "(no match)"
             print(f"  {lab}: {tag}  (best cos={info['score']})", file=sys.stderr)
+    note = alignment_note(transcript)
+    if note:
+        print(f"earshot-diarize: {note}", file=sys.stderr)
     print(f"earshot-diarize: updated\n  {tpath}\n  {mdpath}", file=sys.stderr)
 
 

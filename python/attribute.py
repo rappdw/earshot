@@ -30,6 +30,16 @@ import speakers as spk
 REMOTE_RE = re.compile(r"^REMOTE(-\d+)?$")
 
 
+def find_audio(d, base):
+    """Channel audio path: .wav, or .flac once `earshot clean` compressed it.
+    (Same helper in transcribe.py/diarize.py - keep in sync.)"""
+    for ext in (".wav", ".flac"):
+        p = os.path.join(d, base + ext)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
 def fmt_ts(seconds):
     total = int(seconds or 0)
     h, rem = divmod(total, 3600)
@@ -160,7 +170,7 @@ def main():
     args = ap.parse_args()
 
     tpath, transcript = load_transcript(args.meeting_dir, args.transcript)
-    far = args.far or (os.path.join(args.meeting_dir, "far_remote.wav") if args.meeting_dir else None)
+    far = args.far or (find_audio(args.meeting_dir, "far_remote") if args.meeting_dir else None)
     if not far or not os.path.isfile(far):
         sys.exit("error: far_remote.wav not found (pass a meeting dir or --far)")
     if not shutil.which("ffmpeg"):

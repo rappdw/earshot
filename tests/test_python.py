@@ -17,6 +17,7 @@ import diarize                  # noqa: E402
 import attribute                # noqa: E402
 import summarize                # noqa: E402
 import timing                   # noqa: E402
+import transcribe               # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +299,49 @@ class TestSummarize(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True):
             with self.assertRaises(SystemExit):
                 summarize.summarize_claude("t", mock.Mock(model="m", max_tokens=64))
+
+
+# ---------------------------------------------------------------------------
+# transcribe.py (pure helpers; faster_whisper only imported inside main)
+# ---------------------------------------------------------------------------
+class TestTranscribe(unittest.TestCase):
+    def test_resolve_inputs_flac_fallback_and_my_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "far_remote.flac"), "w").close()
+            open(os.path.join(d, "near_me.wav"), "w").close()
+            args = mock.Mock(file=None, meeting_dir=d, speaker=None)
+            with mock.patch.dict(os.environ, {"EARSHOT_MY_NAME": "Dan"}):
+                jobs = transcribe.resolve_inputs(args)
+            chans = {c: (os.path.basename(p), s) for p, s, c in jobs}
+            self.assertEqual(chans["near"], ("near_me.wav", "Dan"))
+            self.assertEqual(chans["far"], ("far_remote.flac", "REMOTE"))
+
+    def test_write_outputs_schema_and_languages(self):
+        with tempfile.TemporaryDirectory() as d:
+            args = mock.Mock(meeting_dir=d, file=None, model="large-v3")
+            meta = {"device": "cpu", "compute_type": "int8", "language": "en",
+                    "languages": {"near": "en", "far": "en"},
+                    "generated_at": "2026-07-02T00:00:00"}
+            segs = [{"speaker": "Dan", "channel": "near", "start": 0,
+                     "end": 1, "text": "hi", "words": None}]
+            jpath, _ = transcribe.write_outputs(args, segs, meta)
+            with open(jpath) as fh:
+                js = json.load(fh)
+            self.assertEqual(js["schema"], 1)
+            self.assertEqual(js["languages"]["far"], "en")
+
+
+# ---------------------------------------------------------------------------
+# diarize alignment note
+# ---------------------------------------------------------------------------
+class TestAlignmentNote(unittest.TestCase):
+    def test_ok_and_warning(self):
+        t = _timing_transcript(lambda s: 0.1)
+        self.assertIn("(ok)", diarize.alignment_note(t))
+        t = _timing_transcript(lambda s: 6.0)
+        self.assertIn("WARNING", diarize.alignment_note(t))
+        # un-analyzable transcript -> silently None, never raises
+        self.assertIsNone(diarize.alignment_note({"segments": []}))
 
 
 # ---------------------------------------------------------------------------

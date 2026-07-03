@@ -168,6 +168,15 @@ def best_raw_speaker(seg_start, seg_end, turns):
     return best_lab
 
 
+def dropped_manual_names(prev_identification, new_labels):
+    """Names the user assigned by hand (attribute) that a fresh diarize run
+    will not reproduce (their embedding never made it into the library)."""
+    prev = prev_identification or {}
+    return sorted(n for n, info in prev.items()
+                  if isinstance(info, dict) and info.get("source") == "manual"
+                  and n not in new_labels)
+
+
 def relabel(transcript, turns, raw_to_final):
     for seg in transcript["segments"]:
         if seg.get("channel") != "far":
@@ -261,6 +270,12 @@ def main():
         final_embeddings[final] = emb
 
     final_labels = sorted(set(raw_to_final.values()))
+    prev_ident = (transcript.get("diarization") or {}).get("identification") or {}
+    dropped = dropped_manual_names(prev_ident, final_labels)
+    if dropped:
+        print("earshot-diarize: WARNING - re-diarizing drops manually assigned "
+              f"name(s) that could not be re-identified: {', '.join(dropped)}. "
+              "Run `earshot attribute` again to restore them.", file=sys.stderr)
     transcript["diarization"] = {
         "model": args.model,
         "device": device,

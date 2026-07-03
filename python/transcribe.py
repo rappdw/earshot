@@ -132,6 +132,7 @@ def write_outputs(args, all_segments, meta):
         "device": meta["device"],
         "compute_type": meta["compute_type"],
         "language": meta["language"],
+        "languages": meta.get("languages", {}),
         "generated_at": meta["generated_at"],
         "segments": all_segments,
     }
@@ -180,13 +181,15 @@ def main():
 
     jobs = resolve_inputs(args)
     all_segments = []
-    detected_lang = args.language or ""
+    languages = {}
     for path, speaker, channel in jobs:
         print(f"earshot-transcribe: {channel} -> {speaker}: {path}", file=sys.stderr)
         segs, info = transcribe_channel(model, path, speaker, channel, args, prompt)
-        if not detected_lang:
-            detected_lang = info.language
+        languages[channel] = info.language
         all_segments.extend(segs)
+    # primary language: forced > the far channel (most content) > whatever ran
+    detected_lang = args.language or languages.get("far") \
+        or next(iter(languages.values()), "")
         print(f"  {len(segs)} segments (lang={info.language} "
               f"p={info.language_probability:.2f})", file=sys.stderr)
 
@@ -196,6 +199,7 @@ def main():
         "device": device,
         "compute_type": compute_type,
         "language": detected_lang,
+        "languages": languages,
         "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
     }
     jpath, mpath = write_outputs(args, all_segments, meta)

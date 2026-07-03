@@ -37,6 +37,7 @@ cat > "${STUB}/ssh" <<'EOF'
 #!/usr/bin/env bash
 echo "SSH|$*" >> "${TEST_LOG}"
 case "$*" in
+  *"tmux new-session"*)    if [ "${TEST_FAIL_LAUNCH:-0}" = "1" ]; then exit 1; fi ;;
   *"echo done"*)           echo done ;;
   *"cat '"*"/.status'"*)   echo 0 ;;
   *"echo yes || echo no"*) echo "${TEST_SESSION_EXISTS:-no}" ;;
@@ -154,6 +155,25 @@ export TEST_LOG="${WORK}/t3.log"; : > "${TEST_LOG}"
 OUT="$(TEST_SESSION_EXISTS=yes "${EARSHOT}" offload "${M}" --poll 1 2>&1)"; RC=$?
 check "existing session refused" "already exists" "$OUT"
 [ "$RC" -ne 0 ] && ok "guard exits non-zero" || fail "guard exits non-zero"
+
+# ==========================================================================
+echo "[offload] launch failure cleans up the secret-bearing runner"
+export TEST_LOG="${WORK}/t3b.log"; : > "${TEST_LOG}"
+OUT="$(TEST_FAIL_LAUNCH=1 HF_TOKEN=hf_X "${EARSHOT}" offload "${M}" --poll 1 2>&1)"; RC=$?
+check "clear launch error" "is tmux installed" "$OUT"
+[ "$RC" -ne 0 ] && ok "launch failure exits non-zero" || fail "launch failure exits non-zero"
+check "remote runner removed" "rm -f 'earshot-work" "$(cat "${TEST_LOG}")"
+
+echo "[offload] --collect does not require local audio"
+NOWAV="${WORK}/meet/personal/collect-only"; mkdir -p "${NOWAV}"
+export TEST_LOG="${WORK}/t3c.log"; : > "${TEST_LOG}"
+OUT="$("${EARSHOT}" offload "${NOWAV}" --collect --poll 1 2>&1)"; RC=$?
+[ "$RC" -eq 0 ] && ok "collect works without far_remote.wav" || fail "collect works without far_remote.wav ($OUT)"
+
+echo "[flags] -c without a value errors clearly"
+OUT="$("${EARSHOT}" speakers -c 2>&1)"; RC=$?
+check "clear missing-value error" "requires a value" "$OUT"
+[ "$RC" -ne 0 ] && ok "missing value exits non-zero" || fail "missing value exits non-zero"
 
 # ==========================================================================
 echo "[context routing] speakers list picks per-context library"

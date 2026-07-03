@@ -64,6 +64,25 @@ class TestSpeakers(unittest.TestCase):
             self.assertIn("Dan", lib2["speakers"])
             self.assertEqual(len(lib2["speakers"]["Dan"]["samples"]), 1)
 
+    def test_library_save_is_private_atomic_and_backed_up(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "speakers.json")
+            with mock.patch.dict(os.environ, {"EARSHOT_SPEAKERS": path}):
+                lib = spk.load_library()
+                spk.add_sample(lib, "Dan", [1.0, 0.0])
+                spk.save_library(lib)
+                self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+                self.assertFalse(os.path.exists(path + ".tmp"))
+                spk.add_sample(lib, "Sara", [0.0, 1.0])
+                spk.save_library(lib)
+                # previous generation preserved
+                with open(path + ".bak") as fh:
+                    prev = json.load(fh)
+                self.assertNotIn("Sara", prev["speakers"])
+                with open(path) as fh:
+                    cur = json.load(fh)
+                self.assertIn("Sara", cur["speakers"])
+
 
 # ---------------------------------------------------------------------------
 # diarize.py (pure logic; no torch/pyannote imports at module level)
@@ -87,6 +106,15 @@ class TestDiarize(unittest.TestCase):
         self.assertEqual(diarize.best_raw_speaker(8.0, 13.0, TURNS), "SPEAKER_01")
         # no overlap at all
         self.assertIsNone(diarize.best_raw_speaker(50.0, 55.0, TURNS))
+
+    def test_dropped_manual_names(self):
+        prev = {"Dan": {"matched": "Dan", "score": 1.0, "source": "manual"},
+                "Sara": {"matched": "Sara", "score": 0.8},
+                "Kim": {"matched": "Kim", "score": 1.0, "source": "manual"}}
+        # Dan re-identified this run; Kim wasn't; Sara wasn't manual
+        self.assertEqual(diarize.dropped_manual_names(prev, ["Dan", "REMOTE-1"]),
+                         ["Kim"])
+        self.assertEqual(diarize.dropped_manual_names(None, ["X"]), [])
 
     def test_relabel_far_only(self):
         transcript = {"segments": [
@@ -130,13 +158,26 @@ class TestAttribute(unittest.TestCase):
     def test_unidentified_labels_only_remote_n(self):
         t = _attr_transcript()
         self.assertEqual(attribute.unidentified_labels(t), ["REMOTE-1", "REMOTE-2"])
-        t["diarization"]["labels"] = ["Dan", "REMOTE-2"]
+        # rename REMOTE-1 -> Dan the way apply_names would (labels AND segments)
+        attribute.apply_names(t, {"REMOTE-1": "Dan"})
         self.assertEqual(attribute.unidentified_labels(t), ["REMOTE-2"])
 
     def test_generic_remote_fallback_offered(self):
         t = _attr_transcript()
-        t["diarization"]["labels"] = ["REMOTE", "REMOTE-2"]
-        self.assertEqual(attribute.unidentified_labels(t), ["REMOTE", "REMOTE-2"])
+        t["diarization"]["labels"] = []
+        for s in t["segments"]:
+            if s["channel"] == "far":
+                s["speaker"] = "REMOTE"
+        self.assertEqual(attribute.unidentified_labels(t), ["REMOTE"])
+
+    def test_generic_remote_offered_even_when_labels_present(self):
+        # regression: diarization.labels never contains the no-overlap fallback
+        # label, but segments carrying it must still be offered for naming
+        t = _attr_transcript()
+        t["segments"].append({"channel": "far", "speaker": "REMOTE",
+                              "start": 40, "end": 44, "text": "orphan"})
+        self.assertEqual(attribute.unidentified_labels(t),
+                         ["REMOTE", "REMOTE-1", "REMOTE-2"])
 
     def test_sample_prefers_turn_time_over_segment_time(self):
         # segment says 5s (whisper), turn says 100s (audio truth) -> use 100

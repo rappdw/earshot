@@ -41,10 +41,19 @@ def load_library():
 
 
 def save_library(lib):
+    """Write the library atomically (tmp + rename), 0600 (voiceprints are
+    biometric data), keeping the previous version as .bak."""
     p = lib_path()
     os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "w", encoding="utf-8") as fh:
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(lib, fh, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, 0o600)
+    if os.path.exists(p):
+        os.replace(p, p + ".bak")
+    os.replace(tmp, p)
     return p
 
 

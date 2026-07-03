@@ -46,12 +46,14 @@ def load_transcript(meeting_dir, override):
 
 
 def unidentified_labels(transcript):
+    # Union of the diarization cluster labels and whatever actually appears on
+    # far segments: the generic "REMOTE" fallback (segments with no turn
+    # overlap) is never in diarization.labels, but should still be offered.
     diar = transcript.get("diarization") or {}
-    labels = diar.get("labels")
-    if not labels:  # fall back to whatever appears on far segments
-        labels = sorted({s.get("speaker") for s in transcript.get("segments", [])
-                         if s.get("channel") == "far" and s.get("speaker")})
-    return [l for l in labels if l and REMOTE_RE.match(l)]
+    labels = set(diar.get("labels") or [])
+    labels |= {s.get("speaker") for s in transcript.get("segments", [])
+               if s.get("channel") == "far" and s.get("speaker")}
+    return sorted(l for l in labels if l and REMOTE_RE.match(l))
 
 
 def _far_text_at(transcript, start, end):

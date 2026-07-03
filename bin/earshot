@@ -38,9 +38,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Help = the header comment up to the ==help-end== marker (edits to the header
-# can't silently truncate or overrun the help text).
+# can't silently truncate or overrun the help text). If the marker ever goes
+# missing, fall back to a bounded slice rather than dumping the whole script.
 usage() {
-  sed -n '2,/^# ==help-end==/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+  if grep -q '^# ==help-end==' "$0"; then
+    sed -n '2,/^# ==help-end==/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+  else
+    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+  fi
+}
+
+# Fail clearly when a flag that needs a value didn't get one.
+need_val() {  # need_val <flag> <value...>
+  if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+    echo "earshot: $1 requires a value" >&2
+    exit 1
+  fi
 }
 
 # Escape a string for embedding in a JSON double-quoted value.
@@ -114,12 +127,18 @@ av_print_list() {
 # Reads from the terminal (EARSHOT_TTY overrides for tests); returns 1 when
 # non-interactive, aborted (empty input), or given an invalid index.
 av_pick_interactive() {
-  local role="$1" tty="${EARSHOT_TTY:-/dev/tty}" choice idx name
+  local role="$1" tty="${EARSHOT_TTY:-/dev/tty}" listing choice idx name
   RESOLVED_IDX="" RESOLVED_NAME=""
   [ -r "${tty}" ] || return 1
+  # enumerate ONCE: display and validation use the same snapshot, so a device
+  # appearing mid-prompt can't shift the index under the user's choice
+  listing="$(_av_audio_section)"
   {
     echo "earshot: configured device for ${role} not found."
-    av_print_list
+    echo "Current audio input devices (index  name):"
+    printf '%s\n' "${listing}" | while IFS=$'\t' read -r idx name; do
+      printf '  %-3s %s\n' "$idx" "$name"
+    done
   } >&2
   printf 'Select a device number for %s (Enter to abort): ' "${role}" >&2
   IFS= read -r choice < "${tty}" || return 1
@@ -129,7 +148,9 @@ av_pick_interactive() {
       RESOLVED_IDX="${idx}" RESOLVED_NAME="${name}"
       return 0
     fi
-  done < <(_av_audio_section)
+  done <<EOF
+${listing}
+EOF
   echo "earshot: '${choice}' is not a listed device index." >&2
   return 1
 }
@@ -230,7 +251,7 @@ parse_ctx() {
   CTX=""; REST=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      -c|--context) CTX="$2"; shift 2 ;;
+      -c|--context) need_val "$1" "${2:-}"; CTX="$2"; shift 2 ;;
       *) REST+=("$1"); shift ;;
     esac
   done
@@ -306,7 +327,7 @@ cmd_offload() {
       --remote-dir)  RROOT="$2"; shift 2 ;;
       --remote-cmd)  RCMD="$2"; shift 2 ;;
       --device)      DEVICE="$2"; shift 2 ;;
-      -c|--context)  CTX="$2"; shift 2 ;;
+      -c|--context)  need_val "$1" "${2:-}"; CTX="$2"; shift 2 ;;
       --transcribe)  DO_TX=1; shift ;;
       --diarize)     DO_DZ=1; shift ;;
       --summarize)   DO_SUM=1; shift ;;
@@ -342,8 +363,10 @@ cmd_offload() {
   if [ -z "${DIR}" ] || [ ! -d "${DIR}" ]; then
     echo "earshot offload: pass a meeting directory" >&2; exit 1
   fi
-  if [ ! -f "${DIR}/far_remote.wav" ]; then
-    echo "earshot offload: ${DIR}/far_remote.wav not found" >&2; exit 1
+  # audio only needs to exist locally when we're going to push it
+  if [ "${COLLECT}" -eq 0 ] && [ ! -f "${DIR}/far_remote.wav" ] \
+     && [ ! -f "${DIR}/far_remote.flac" ]; then
+    echo "earshot offload: no far_remote.wav/.flac in ${DIR}" >&2; exit 1
   fi
   if [ -z "${HOST}" ]; then
     echo "earshot offload: no Spark host. Set EARSHOT_SPARK_HOST in earshot.conf or pass --host" >&2
@@ -458,7 +481,12 @@ EOF
     rm -f "${TMPRUN}"
 
     echo "earshot offload: launching remote job in tmux..."
-    ${rsh} "${HOST}" "tmux new-session -d -s ${SESSION} \"bash -l '${RDIR}/.run.sh'\""
+    if ! ${rsh} "${HOST}" "tmux new-session -d -s ${SESSION} \"bash -l '${RDIR}/.run.sh'\""; then
+      # the runner only self-deletes when it RUNS; don't leave secrets behind
+      ${rsh} "${HOST}" "rm -f '${RDIR}/.run.sh'" || true
+      echo "earshot offload: failed to launch the remote job (is tmux installed on ${HOST}?)" >&2
+      exit 1
+    fi
   else
     echo "earshot offload: collecting from ${HOST}:${RDIR} (tmux=${SESSION})"
   fi
@@ -527,7 +555,7 @@ cmd_record() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -p|--profile)   PROFILE="$2"; shift 2 ;;
-      -c|--context)   CONTEXT="$2"; shift 2 ;;
+      -c|--context)   need_val "$1" "${2:-}"; CONTEXT="$2"; shift 2 ;;
       -t|--title)     TITLE="$2";   shift 2 ;;
       -o|--out)       OUT_OVERRIDE="$2"; shift 2 ;;
       -r|--rate)      RATE="$2";    shift 2 ;;
@@ -631,17 +659,17 @@ cmd_record() {
     far_af="-af silencedetect=noise=${SILENCE_DB}:d=${AUTOSTOP}"
   fi
   # shellcheck disable=SC2086
-  ffmpeg -hide_banner -nostdin -f avfoundation -i ":${FAR_IDX}" \
+  ffmpeg -hide_banner -nostdin -y -f avfoundation -i ":${FAR_IDX}" \
     ${far_af} -c:a pcm_s16le -ar "${RATE}" "${FAR}" </dev/null >"${FAR_LOG}" 2>&1 &
   local FAR_PID=$!
-  ffmpeg -hide_banner -nostdin -f avfoundation -i ":${NEAR_IDX}" \
+  ffmpeg -hide_banner -nostdin -y -f avfoundation -i ":${NEAR_IDX}" \
     -c:a pcm_s16le -ar "${RATE}" "${NEAR}" </dev/null >"${NEAR_LOG}" 2>&1 &
   local NEAR_PID=$!
 
   stop_recording() {
     kill -INT "${FAR_PID}" "${NEAR_PID}" 2>/dev/null || true
   }
-  trap 'stop_recording' INT TERM
+  trap 'stop_reason="interrupted"; stop_recording' INT TERM
 
   echo "earshot: recording... press Enter to stop (or Ctrl-C)."
   if [ "${AUTOSTOP}" -gt 0 ] 2>/dev/null; then

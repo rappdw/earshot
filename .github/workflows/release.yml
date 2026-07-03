@@ -11,12 +11,25 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: run the test suite
+        run: |
+          python3 -m unittest discover -s tests
+          if [ "$RUNNER_OS" = "macOS" ]; then /bin/bash tests/test_bash.sh
+          else bash tests/test_bash.sh; fi
+
   release:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: run the test suite first
-        run: ./tests/run.sh
       - name: create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

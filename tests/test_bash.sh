@@ -210,10 +210,23 @@ ESC="$(json_escape 'a "quote" and \ backslash')"
 OUT="$(printf '{"t": "%s"}' "${ESC}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["t"])')"
 check "json_escape round-trips through a JSON parser" 'a "quote" and \ backslash' "$OUT"
 
-echo "[edges] rec -c with a pre-context config gives a clear error"
-OUT="$(EARSHOT_CONF="${OLDCONF}" "${EARSHOT}" rec -c business -t x 2>&1 </dev/null)"; RC=$?
-check "clear pre-context error" "predates contexts" "$OUT"
-[ "$RC" -ne 0 ] && ok "rec -c exits non-zero on old conf" || fail "rec -c exits non-zero"
+echo "[edges] rec -c works on a pre-context config via built-in defaults"
+printf '\n' > "${WORK}/tty-empty"
+OUT="$(EARSHOT_CONF="${OLDCONF}" EARSHOT_TTY="${WORK}/tty-empty" \
+       "${EARSHOT}" rec -c business -t x 2>&1 </dev/null)"; RC=$?
+check_not "no pre-context error anymore" "predates contexts" "$OUT"
+# it gets PAST context resolution and fails only on the (fake) mic
+check "reached mic resolution" "no mic from profile" "$OUT"
+
+# ==========================================================================
+echo "[no config] earshot is fully functional without any earshot.conf"
+# EARSHOT_CONF pointed at a nonexistent file + no repo/etc conf reachable
+OUT="$(EARSHOT_CONF="${WORK}/does-not-exist.conf" EARSHOT_TTY="${WORK}/tty-empty" \
+       "${EARSHOT}" rec -p obsbot -t x -o "${WORK}/noconf" 2>&1 </dev/null || true)"
+check_not "no conf-missing error" "no earshot.conf found" "$OUT"
+check "built-in obsbot profile resolves" "near 'OBSBOT Meet Microphone'" "$OUT"
+OUT="$(EARSHOT_CONF="${WORK}/does-not-exist.conf" "${EARSHOT}" speakers -c personal list 2>&1)"
+check "built-in personal context library" "speakers-personal.json" "$OUT"
 
 # ==========================================================================
 echo "[dispatch] every python subcommand reaches its tool (not bash breakage)"

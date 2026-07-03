@@ -36,12 +36,25 @@ judgment (what actually mattered). The narrative merges both.
    - `notes.md` — machine-generated summary, may exist. Treat it as a weak
      prior only; your narrative supersedes it. Never copy from it.
 
-2. **The user's own notes**, taken live with `/take-notes`. Find them: glob
-   `meeting-notes/*.md` in the workspace and match on the meeting date (from
-   `meeting.json.started_at` or the folder name) and title similarity. If one
-   plausible file matches, use it and say so; if several could match or none
-   do, ask the user rather than guessing. These notes follow a known shape:
-   a header (Date/Attendees/Purpose), then `## Notes` (chronological,
+2. **The user's own notes**, taken live with `/take-notes`. Resolve them
+   pointer first:
+   1. Grep `meeting-notes/*.md` in the workspace for a `**Recording**:`
+      header line that points at this meeting directory. thinkkit v0.8.0+
+      writes one automatically when notes are taken alongside an earshot
+      recording, and `earshot rec` prints the same line on stop for
+      hand-pasting. Match on the capture directory's basename (e.g.
+      `2026-07-03_141530_q4-planning`); the pointer may be absolute or
+      workspace-relative, with or without a trailing slash. A pointer match
+      is definitive: use that file and say so, without asking. If more than
+      one file carries the pointer, ask.
+   2. Only when no pointer matches (hand-taken notes, or notes from before
+      thinkkit v0.8.0): fall back to matching on the meeting date (from
+      `meeting.json.started_at` or the folder name) and title similarity.
+      If one plausible file matches, use it and say so; if several could
+      match or none do, ask the user rather than guessing.
+
+   These notes follow a known shape: a header (Date/Attendees/Purpose, and
+   possibly the `**Recording**:` pointer), then `## Notes` (chronological,
    speaker-attributed entries), `## Action Items` (owner-tagged checkboxes),
    and `## Open Questions`.
 

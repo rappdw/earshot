@@ -109,6 +109,7 @@ if [ -n "${M3D}" ] && [ ! -f "${M3D}/monitor_stereo.wav" ]; then
 else
   fail "no monitor file by default"
 fi
+check "stop prints the take-notes pairing pointer" "**Recording**: ${M3D}/" "$OUT"
 
 echo "[rec] --then runs the follow-up earshot command on the meeting dir"
 OUT="$("${EARSHOT}" rec -p obsbot -t t8 -o "${WORK}/rec8" --then "devices" 2>&1 </dev/null || true)"

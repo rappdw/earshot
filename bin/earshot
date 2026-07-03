@@ -880,6 +880,10 @@ EOF
   echo "  near_me.wav        (your mic)"
   [ -f "${MON}" ] && echo "  monitor_stereo.wav (L=remote, R=you) for a quick listen"
   echo "  -> ${MEET_DIR}"
+  # thinkkit pairing contract: the notes file points at the capture dir,
+  # never the reverse (take-notes >=0.8.0 writes the header itself).
+  echo "to pair hand-taken notes, add this line to the notes file header:"
+  echo "**Recording**: ${MEET_DIR}/"
 
   # Auto-pipeline: run a follow-up earshot command on the finished meeting
   # (--then "offload --summarize" or EARSHOT_AFTER_REC in the conf).

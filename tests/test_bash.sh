@@ -103,7 +103,12 @@ J="$(cat "${WORK}"/rec3/*/meeting.json 2>/dev/null)"
 check "meeting.json records the resolved name, not the list" '"near_device": "OBSBOT Meet Microphone"' "$J"
 check "recording succeeded via stub" "earshot: done." "$OUT"
 check "monitor is off by default (json null)" '"monitor_stereo": null' "$J"
-[ ! -f "${WORK}"/rec3/*/monitor_stereo.wav ] && ok "no monitor file by default" || fail "no monitor file by default"
+M3D="$(find "${WORK}/rec3" -mindepth 1 -maxdepth 1 -type d | head -1)"
+if [ -n "${M3D}" ] && [ ! -f "${M3D}/monitor_stereo.wav" ]; then
+  ok "no monitor file by default"
+else
+  fail "no monitor file by default"
+fi
 
 echo "[rec] --then runs the follow-up earshot command on the meeting dir"
 OUT="$("${EARSHOT}" rec -p obsbot -t t8 -o "${WORK}/rec8" --then "devices" 2>&1 </dev/null || true)"

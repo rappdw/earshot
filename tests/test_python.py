@@ -406,5 +406,110 @@ class TestTiming(unittest.TestCase):
         self.assertAlmostEqual(timing.overlap_with(merged, starts, 6, 11), 3.0)
 
 
+# ---------------------------------------------------------------------------
+# meetings.py (list / grep / clean)
+# ---------------------------------------------------------------------------
+import contextlib
+import io
+
+import meetings                 # noqa: E402
+
+
+def _fixture_tree(d):
+    """Two meetings: one transcribed+diarized with old wav audio, one bare."""
+    m1 = os.path.join(d, "2026-06-01_100000_alpha")
+    m2 = os.path.join(d, "2026-07-01_100000_beta")
+    os.makedirs(m1)
+    os.makedirs(m2)
+    for base in ("far_remote", "near_me"):
+        p = os.path.join(m1, base + ".wav")
+        with open(p, "wb") as fh:
+            fh.write(b"\0" * 10000)
+        os.utime(p, (0, 0))  # ancient
+    with open(os.path.join(m1, "monitor_stereo.wav"), "wb") as fh:
+        fh.write(b"\0" * 5000)
+    with open(os.path.join(m1, "transcript.json"), "w") as fh:
+        json.dump({"schema": 1, "diarization": {"labels": ["Dan"]},
+                   "segments": [{"channel": "far", "speaker": "Dan",
+                                 "start": 12, "end": 15,
+                                 "text": "the Kong migration plan"}]}, fh)
+    with open(os.path.join(m2, "far_remote.wav"), "wb") as fh:
+        fh.write(b"\0" * 800)
+    return m1, m2
+
+
+class TestMeetings(unittest.TestCase):
+    def _env(self, d):
+        return mock.patch.dict(os.environ, {"EARSHOT_ROOTS": d})
+
+    def test_list_shows_status(self):
+        with tempfile.TemporaryDirectory() as d:
+            _fixture_tree(d)
+            with self._env(d):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    meetings.cmd_list(mock.Mock(all=True, limit=15))
+            text = out.getvalue()
+            self.assertIn("alpha", text)
+            self.assertIn("beta", text)
+            # alpha: transcribed+diarized+attributed; beta: nothing yet
+            alpha = [l for l in text.splitlines() if "alpha" in l][0]
+            self.assertRegex(alpha, r"x\s+x\s+x\s+-")
+
+    def test_grep_finds_with_context(self):
+        with tempfile.TemporaryDirectory() as d:
+            _fixture_tree(d)
+            with self._env(d):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    meetings.cmd_grep(mock.Mock(pattern="kong", all=False))
+            self.assertIn("[00:00:12] Dan: the Kong migration plan", out.getvalue())
+
+    def test_clean_dry_run_touches_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            m1, _ = _fixture_tree(d)
+            with self._env(d):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    meetings.cmd_clean(mock.Mock(days=14, apply=False,
+                                                 purge_audio=True))
+            self.assertIn("would rm", out.getvalue())
+            self.assertTrue(os.path.exists(os.path.join(m1, "far_remote.wav")))
+
+    def test_clean_compress_via_stub_ffmpeg(self):
+        with tempfile.TemporaryDirectory() as d, \
+             tempfile.TemporaryDirectory() as stub:
+            m1, _ = _fixture_tree(d)
+            ff = os.path.join(stub, "ffmpeg")
+            with open(ff, "w") as fh:
+                fh.write("#!/bin/sh\n"
+                         'out=""; for a in "$@"; do out="$a"; done\n'
+                         'printf x > "$out"\n')
+            os.chmod(ff, 0o755)
+            env = {"EARSHOT_ROOTS": d, "PATH": stub + os.pathsep + os.environ["PATH"]}
+            with mock.patch.dict(os.environ, env):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    meetings.cmd_clean(mock.Mock(days=14, apply=True,
+                                                 purge_audio=False))
+            # wavs compressed away, flacs exist, monitor removed
+            self.assertFalse(os.path.exists(os.path.join(m1, "far_remote.wav")))
+            self.assertTrue(os.path.exists(os.path.join(m1, "far_remote.flac")))
+            self.assertFalse(os.path.exists(os.path.join(m1, "monitor_stereo.wav")))
+
+    def test_clean_purge_requires_transcript(self):
+        with tempfile.TemporaryDirectory() as d:
+            m1, m2 = _fixture_tree(d)
+            old = os.path.join(m2, "far_remote.wav")
+            os.utime(old, (0, 0))  # old but NO transcript in m2
+            with self._env(d):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    meetings.cmd_clean(mock.Mock(days=14, apply=True,
+                                                 purge_audio=True))
+            self.assertTrue(os.path.exists(old))      # protected
+            self.assertFalse(os.path.exists(os.path.join(m1, "far_remote.wav")))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,9 @@
 #   earshot attribute DIR ...   play each unknown speaker, name them, learn the voice
 #   earshot summarize DIR ...   write notes.md (local Ollama; --backend claude opt-in)
 #   earshot timing DIR ...      diagnose Whisper-vs-pyannote timestamp alignment
+#   earshot list                pipeline status of recent meetings (ls)
+#   earshot grep PATTERN        search all transcripts (speaker + timestamp)
+#   earshot clean [--apply]     compress/purge old meeting audio (dry-run default)
 #   earshot enroll NAME ...     add a voice to the speaker library
 #   earshot speakers [list|remove|rename] ...   manage the speaker library
 #   earshot offload DIR ...     run transcribe/diarize on the DGX Spark over SSH
@@ -335,6 +338,21 @@ cmd_devices() {
   av_print_list
 }
 
+# list/grep/clean operate across the configured meeting roots.
+run_meetings() {
+  local sub="$1"; shift
+  load_config
+  local r="" x
+  for x in "${EARSHOT_OUT_ROOT:-${HOME}/Notes/meetings}" \
+           "${EARSHOT_OUT_ROOT_BUSINESS:-${EARSHOT_OUT_ROOT:-${HOME}/Notes/meetings}/business}" \
+           "${EARSHOT_OUT_ROOT_PERSONAL:-${EARSHOT_OUT_ROOT:-${HOME}/Notes/meetings}/personal}"; do
+    [ -d "${x}" ] && r="${r:+${r}:}${x}"
+  done
+  export EARSHOT_ROOTS="${r}"
+  export EARSHOT_CLEAN_DAYS
+  run_tool meetings.py any "${sub}" "$@"
+}
+
 # ===========================================================================
 # Spark offload (SSH + rsync, remote work in tmux so it survives disconnects)
 # ===========================================================================
@@ -589,6 +607,7 @@ cmd_record() {
   local AUTOSTOP="${EARSHOT_AUTOSTOP_SILENCE:-180}"
   local SILENCE_DB="${EARSHOT_SILENCE_DB:--50dB}"
   local MAX_MIN="${EARSHOT_MAX_MINUTES:-0}"
+  local MONITOR="${EARSHOT_MONITOR:-0}"
   local TITLE=""
 
   while [ "$#" -gt 0 ]; do
@@ -601,6 +620,7 @@ cmd_record() {
       --auto-stop)    AUTOSTOP="$2"; shift 2 ;;
       --no-auto-stop) AUTOSTOP=0;   shift ;;
       --max-min)      MAX_MIN="$2"; shift 2 ;;
+      --monitor)      MONITOR=1;    shift ;;
       -h|--help)      usage; exit 0 ;;
       *) echo "earshot rec: unknown argument: $1" >&2; exit 1 ;;
     esac
@@ -753,8 +773,10 @@ cmd_record() {
     fail=1
   fi
 
+  # Opt-in (--monitor / EARSHOT_MONITOR=1): the stereo monitor is a pure
+  # convenience copy that doubles the meeting's disk footprint.
   # -ac 1 downmixes each input regardless of its native channel count.
-  if [ -s "${FAR}" ] && [ -s "${NEAR}" ]; then
+  if [ "${MONITOR}" = "1" ] && [ -s "${FAR}" ] && [ -s "${NEAR}" ]; then
     echo "earshot: building monitor_stereo.wav..."
     local FAR_MONO="${MEET_DIR}/.far_mono.wav"
     local NEAR_MONO="${MEET_DIR}/.near_mono.wav"
@@ -783,7 +805,7 @@ cmd_record() {
   "files": {
     "far_remote": "far_remote.wav",
     "near_me": "near_me.wav",
-    "monitor_stereo": "monitor_stereo.wav"
+    "monitor_stereo": $( [ -f "${MON}" ] && echo '"monitor_stereo.wav"' || echo null )
   }
 }
 EOF
@@ -798,7 +820,7 @@ EOF
   echo "earshot: done."
   echo "  far_remote.wav     (the call, everyone but you)"
   echo "  near_me.wav        (your mic)"
-  echo "  monitor_stereo.wav (L=remote, R=you) for a quick listen"
+  [ -f "${MON}" ] && echo "  monitor_stereo.wav (L=remote, R=you) for a quick listen"
   echo "  -> ${MEET_DIR}"
 }
 
@@ -813,6 +835,9 @@ case "${1:-}" in
   attribute|attr) shift; cmd_attribute "$@" ;;
   summarize|sum)  shift; cmd_summarize "$@" ;;
   timing)         shift; cmd_timing "$@" ;;
+  list|ls)        shift; run_meetings list "$@" ;;
+  grep|search)    shift; run_meetings grep "$@" ;;
+  clean)          shift; run_meetings clean "$@" ;;
   enroll)         shift; run_speakers enroll "$@" ;;
   speakers|spk)   shift; run_speakers "$@" ;;
   offload)        shift; cmd_offload "$@" ;;

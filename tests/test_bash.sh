@@ -101,6 +101,7 @@ check "falls through to next candidate" "near 'OBSBOT Meet 4K Microphone' (index
 OUT="$(EARSHOT_CONF="${CONF}" "${EARSHOT}" rec -p obsbot -t t3 -o "${WORK}/rec3" 2>&1 </dev/null || true)"
 J="$(cat "${WORK}"/rec3/*/meeting.json 2>/dev/null)"
 check "meeting.json records the resolved name, not the list" '"near_device": "OBSBOT Meet Microphone"' "$J"
+check "meeting.json mode is call for two-channel" '"mode": "call"' "$J"
 check "recording succeeded via stub" "earshot: done." "$OUT"
 check "monitor is off by default (json null)" '"monitor_stereo": null' "$J"
 M3D="$(find "${WORK}/rec3" -mindepth 1 -maxdepth 1 -type d | head -1)"
@@ -110,6 +111,21 @@ else
   fail "no monitor file by default"
 fi
 check "stop prints the take-notes pairing pointer" "**Recording**: ${M3D}/" "$OUT"
+
+echo "[rec] --in-person records the mic into the far slot (no call-audio device)"
+OUT="$(EARSHOT_BLACKHOLE_NAME="No Such Device" "${EARSHOT}" rec --in-person -p obsbot -t t9 -o "${WORK}/rec9" 2>&1 </dev/null || true)"
+check "records without the call-audio device present" "earshot: done." "$OUT"
+check "announces the room routing" "far_remote.wav (the whole room)" "$OUT"
+J9="$(cat "${WORK}"/rec9/*/meeting.json 2>/dev/null)"
+check "meeting.json mode is in-person" '"mode": "in-person"' "$J9"
+check "far_device is the mic" '"far_device": "OBSBOT Meet Microphone"' "$J9"
+check "near_device is null" '"near_device": null' "$J9"
+M9D="$(find "${WORK}/rec9" -mindepth 1 -maxdepth 1 -type d | head -1)"
+if [ -n "${M9D}" ] && [ -s "${M9D}/far_remote.wav" ] && [ ! -f "${M9D}/near_me.wav" ]; then
+  ok "far audio only, no near_me.wav"
+else
+  fail "far audio only, no near_me.wav"
+fi
 
 echo "[rec] --then runs the follow-up earshot command on the meeting dir"
 OUT="$("${EARSHOT}" rec -p obsbot -t t8 -o "${WORK}/rec8" --then "devices" 2>&1 </dev/null || true)"

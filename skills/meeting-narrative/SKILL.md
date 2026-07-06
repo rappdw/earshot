@@ -27,7 +27,9 @@ judgment (what actually mattered). The narrative merges both.
    - `transcript.json` — the ground truth. Fields that matter:
      - `title`, `generated_at`, `diarized_at`
      - `segments[]`: each has `speaker`, `channel` (`near` = the user,
-       `far` = everyone else), `start`/`end` (seconds), `text`
+       `far` = everyone else), `start`/`end` (seconds), `text`. In-person
+       recordings (`meeting.json` has `"mode": "in-person"`) have far
+       segments only, and the user is one of the far speakers.
      - `diarization.labels` and `diarization.identification` — which speakers
        are real names vs still-anonymous `REMOTE-N`
    - `transcript.md` — the same content, human-readable. Use it for quick
@@ -61,7 +63,9 @@ judgment (what actually mattered). The narrative merges both.
 ## Before writing: reconcile speakers
 
 - `YOU` in the transcript is the user. Use their real name if the notes or
-  prior narratives reveal it; otherwise keep "You" consistently.
+  prior narratives reveal it; otherwise keep "You" consistently. In-person
+  transcripts have no `YOU`; the user appears under their attributed name
+  (or as one of the `REMOTE-N` speakers until attributed).
 - If `REMOTE-N` labels remain, try to resolve them from evidence before
   writing: the attendee list in the user's notes, self-introductions in the
   transcript text ("this is Sara"), or vocative addressing ("thanks, Sara").

@@ -6,7 +6,9 @@ faster-whisper, merges the segments by time, and writes transcript.json and
 transcript.md into the meeting folder.
 
 The two-channel capture gives a free YOU-vs-REMOTE split with no diarization
-model. Stage 4 subdivides REMOTE into individual speakers.
+model. Stage 4 subdivides REMOTE into individual speakers. In-person captures
+(rec --in-person) have only far_remote: whichever channels are present get
+transcribed, missing ones are skipped.
 
 Local-only note: the *audio* never leaves the machine. The only network access
 is a one-time download of the model weights from Hugging Face on first run;

@@ -316,6 +316,15 @@ class TestTranscribe(unittest.TestCase):
             self.assertEqual(chans["near"], ("near_me.wav", "Dan"))
             self.assertEqual(chans["far"], ("far_remote.flac", "REMOTE"))
 
+    def test_resolve_inputs_far_only_in_person(self):
+        # in-person captures have no near channel; far alone must transcribe
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "far_remote.wav"), "w").close()
+            args = mock.Mock(file=None, meeting_dir=d, speaker=None)
+            jobs = transcribe.resolve_inputs(args)
+            self.assertEqual(
+                jobs, [(os.path.join(d, "far_remote.wav"), "REMOTE", "far")])
+
     def test_write_outputs_schema_and_languages(self):
         with tempfile.TemporaryDirectory() as d:
             args = mock.Mock(meeting_dir=d, file=None, model="large-v3")

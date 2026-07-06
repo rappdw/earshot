@@ -52,7 +52,8 @@ model by default; a hosted Claude model is available as an explicit opt-in.
 
 - macOS (built and tested on Apple Silicon, macOS 14.4+ / 26).
 - [`ffmpeg`](https://ffmpeg.org/) and [BlackHole 2ch](https://existential.audio/blackhole/):
-  `brew install ffmpeg blackhole-2ch`
+  `brew install ffmpeg blackhole-2ch` (BlackHole is only needed for call
+  capture; `--in-person` recordings skip it)
 - Python 3.9+ for transcription/diarization.
 - For diarization + speaker ID: a free [Hugging Face](https://huggingface.co/)
   token and acceptance of two gated (free) model licenses, see below.
@@ -102,6 +103,7 @@ parallel processes, resolved by device name.
 earshot devices                       # list audio inputs and current indices
 earshot rec                           # record (prompts for a title)
 earshot rec -c personal -t "Mom"      # personal context, titled
+earshot rec --in-person -t "1:1 Sam"  # in-person meeting: mic only, no BlackHole
 earshot transcribe DIR                # faster-whisper -> transcript.json + .md
 earshot diarize DIR                   # split REMOTE into speakers, attribute names
 earshot summarize DIR                 # write notes.md (local Ollama by default)
@@ -120,6 +122,13 @@ earshot help
 A recording stops on **Enter**, on **Ctrl-C**, or **automatically** after a
 sustained silence on the call channel (a meeting that has ended). See
 `earshot rec -h` and the config for the auto-stop knobs.
+
+**In-person meetings:** `earshot rec --in-person` records only the mic, into
+the far channel, because a room mic hears everyone (you included). No
+BlackHole or Multi-Output device is involved, so it works on a bare Mac.
+Diarization and attribution treat the room like any other meeting: you show
+up as one more `REMOTE-N` until you attribute yourself once; after that the
+voice library names you automatically.
 
 **Auto-pipeline:** `earshot rec --then "offload --summarize"` (or
 `EARSHOT_AFTER_REC` in the config) runs any earshot command on the meeting the

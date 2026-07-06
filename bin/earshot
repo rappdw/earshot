@@ -28,6 +28,9 @@
 #   --no-auto-stop   disable silence auto-stop for this recording
 #   --max-min N      hard cap recording length in minutes (0 = no cap)
 #   --monitor        also write monitor_stereo.wav (off by default; doubles disk)
+#   --in-person      in-person meeting: record only the mic, into the far
+#                    channel (no BlackHole needed). Everyone in the room, you
+#                    included, is diarized and attributed by voice.
 #   --then "CMD..."  run `earshot CMD... <meeting-dir>` when the recording ends
 #                    (or set EARSHOT_AFTER_REC; "none" skips a conf-set one)
 #
@@ -36,8 +39,9 @@
 # the per-context speaker library; inferred from the meeting path if omitted.
 #
 # Capture records BlackHole and your mic as two parallel ffmpeg processes,
-# resolved BY NAME. A recording stops on Enter, on Ctrl-C, or automatically
-# after a sustained silence on the call channel (a meeting that has ended).
+# resolved BY NAME (--in-person records just the mic). A recording stops on
+# Enter, on Ctrl-C, or automatically after a sustained silence on the recorded
+# channel (a meeting that has ended).
 # ==help-end==
 
 set -euo pipefail
@@ -664,6 +668,7 @@ cmd_record() {
   local SILENCE_DB="${EARSHOT_SILENCE_DB:--50dB}"
   local MAX_MIN="${EARSHOT_MAX_MINUTES:-0}"
   local MONITOR="${EARSHOT_MONITOR:-0}"
+  local INPERSON=0
   local AFTER="${EARSHOT_AFTER_REC:-}"
   local TITLE=""
 
@@ -678,6 +683,7 @@ cmd_record() {
       --no-auto-stop) AUTOSTOP=0;   shift ;;
       --max-min)      MAX_MIN="$2"; shift 2 ;;
       --monitor)      MONITOR=1;    shift ;;
+      --in-person)    INPERSON=1;   shift ;;
       --then)         need_val "$1" "${2:-}"; AFTER="$2"; shift 2 ;;
       -h|--help)      usage; exit 0 ;;
       *) echo "earshot rec: unknown argument: $1" >&2; exit 1 ;;
@@ -709,15 +715,17 @@ cmd_record() {
     exit 1
   fi
 
-  local FAR_IDX NEAR_IDX NEAR_NAME
-  if ! av_resolve_first "${BLACKHOLE_NAME}"; then
-    if ! av_pick_interactive "call audio (${BLACKHOLE_NAME})"; then
-      echo "earshot: call-audio device '${BLACKHOLE_NAME}' is not present." >&2
-      av_print_list >&2
-      exit 1
+  local FAR_IDX="" NEAR_IDX NEAR_NAME
+  if [ "${INPERSON}" != "1" ]; then
+    if ! av_resolve_first "${BLACKHOLE_NAME}"; then
+      if ! av_pick_interactive "call audio (${BLACKHOLE_NAME})"; then
+        echo "earshot: call-audio device '${BLACKHOLE_NAME}' is not present." >&2
+        av_print_list >&2
+        exit 1
+      fi
     fi
+    FAR_IDX="${RESOLVED_IDX}"
   fi
-  FAR_IDX="${RESOLVED_IDX}"
   if ! av_resolve_first "${MIC_NAME}"; then
     if av_pick_interactive "the microphone (profile '${PROFILE}')"; then
       echo "earshot: using '${RESOLVED_NAME}' for this run. To make it permanent, add it" >&2
@@ -754,8 +762,12 @@ cmd_record() {
   local NEAR_LOG="${MEET_DIR}/.near.log"
 
   echo "earshot: context=${CONTEXT:-none} profile=${PROFILE} rate=${RATE}"
-  echo "earshot: far  '${BLACKHOLE_NAME}' (index ${FAR_IDX}) -> far_remote.wav"
-  echo "earshot: near '${NEAR_NAME}' (index ${NEAR_IDX}) -> near_me.wav"
+  if [ "${INPERSON}" = "1" ]; then
+    echo "earshot: in-person '${NEAR_NAME}' (index ${NEAR_IDX}) -> far_remote.wav (the whole room)"
+  else
+    echo "earshot: far  '${BLACKHOLE_NAME}' (index ${FAR_IDX}) -> far_remote.wav"
+    echo "earshot: near '${NEAR_NAME}' (index ${NEAR_IDX}) -> near_me.wav"
+  fi
   echo "earshot: writing to ${MEET_DIR}"
 
   local START_TS END_TS
@@ -763,36 +775,46 @@ cmd_record() {
 
   # stdin from /dev/null so neither ffmpeg fights for the terminal; we stop them
   # with SIGINT, which ffmpeg handles by finalizing the output cleanly.
-  # When auto-stop is on, silencedetect on the call channel logs a "silence_start"
-  # line once the call has been silent for AUTOSTOP seconds (a passthrough filter,
-  # so far_remote.wav is unchanged).
+  # When auto-stop is on, silencedetect on the recorded channel logs a
+  # "silence_start" line once it has been silent for AUTOSTOP seconds (a
+  # passthrough filter, so far_remote.wav is unchanged).
   local far_af=""
   if [ "${AUTOSTOP}" -gt 0 ] 2>/dev/null; then
     far_af="-af silencedetect=noise=${SILENCE_DB}:d=${AUTOSTOP}"
   fi
+  # In-person, the room mic carries everyone (you included), so it records
+  # into the far slot: the channel the pipeline diarizes and attributes.
+  local REC_IDX="${FAR_IDX}"
+  [ "${INPERSON}" = "1" ] && REC_IDX="${NEAR_IDX}"
   # shellcheck disable=SC2086
-  ffmpeg -hide_banner -nostdin -y -f avfoundation -i ":${FAR_IDX}" \
+  ffmpeg -hide_banner -nostdin -y -f avfoundation -i ":${REC_IDX}" \
     ${far_af} -c:a pcm_s16le -ar "${RATE}" "${FAR}" </dev/null >"${FAR_LOG}" 2>&1 &
   local FAR_PID=$!
-  ffmpeg -hide_banner -nostdin -y -f avfoundation -i ":${NEAR_IDX}" \
-    -c:a pcm_s16le -ar "${RATE}" "${NEAR}" </dev/null >"${NEAR_LOG}" 2>&1 &
-  local NEAR_PID=$!
+  local NEAR_PID=""
+  if [ "${INPERSON}" != "1" ]; then
+    ffmpeg -hide_banner -nostdin -y -f avfoundation -i ":${NEAR_IDX}" \
+      -c:a pcm_s16le -ar "${RATE}" "${NEAR}" </dev/null >"${NEAR_LOG}" 2>&1 &
+    NEAR_PID=$!
+  fi
 
   stop_recording() {
-    kill -INT "${FAR_PID}" "${NEAR_PID}" 2>/dev/null || true
+    kill -INT "${FAR_PID}" ${NEAR_PID:+"${NEAR_PID}"} 2>/dev/null || true
   }
   trap 'stop_reason="interrupted"; stop_recording' INT TERM
 
   echo "earshot: recording... press Enter to stop (or Ctrl-C)."
   if [ "${AUTOSTOP}" -gt 0 ] 2>/dev/null; then
-    echo "earshot: will auto-stop after ${AUTOSTOP}s of call-audio silence (--no-auto-stop to disable)."
+    local SIL_SRC="call-audio"
+    [ "${INPERSON}" = "1" ] && SIL_SRC="room"
+    echo "earshot: will auto-stop after ${AUTOSTOP}s of ${SIL_SRC} silence (--no-auto-stop to disable)."
   fi
   [ "${MAX_MIN}" -gt 0 ] 2>/dev/null && echo "earshot: hard cap ${MAX_MIN} min."
 
   # Watch loop: stop on Enter, on sustained call silence, on max duration, or if
   # ffmpeg dies. Ctrl-C/TERM still works via the trap.
   local t0=$SECONDS stop_reason="ended"
-  while kill -0 "${FAR_PID}" 2>/dev/null && kill -0 "${NEAR_PID}" 2>/dev/null; do
+  while kill -0 "${FAR_PID}" 2>/dev/null \
+        && { [ -z "${NEAR_PID}" ] || kill -0 "${NEAR_PID}" 2>/dev/null; }; do
     if [ -r /dev/tty ]; then
       if read -t 2 -r _ </dev/tty; then stop_reason="manual"; break; fi
     else
@@ -814,7 +836,7 @@ cmd_record() {
 
   stop_recording
   wait "${FAR_PID}" 2>/dev/null || true
-  wait "${NEAR_PID}" 2>/dev/null || true
+  if [ -n "${NEAR_PID}" ]; then wait "${NEAR_PID}" 2>/dev/null || true; fi
   trap - INT TERM
 
   END_TS="$(date +%Y-%m-%dT%H:%M:%S%z)"
@@ -825,12 +847,16 @@ cmd_record() {
     tail -n 5 "${FAR_LOG}" >&2 || true
     fail=1
   fi
-  if [ ! -s "${NEAR}" ]; then
+  if [ "${INPERSON}" != "1" ] && [ ! -s "${NEAR}" ]; then
     echo "earshot: WARNING near_me.wav is empty (mic may be held exclusively by the meeting app). Tail of capture log:" >&2
     tail -n 5 "${NEAR_LOG}" >&2 || true
     fail=1
   fi
 
+  if [ "${MONITOR}" = "1" ] && [ "${INPERSON}" = "1" ]; then
+    echo "earshot: --monitor is moot in-person (one channel); play far_remote.wav directly."
+    MONITOR=0
+  fi
   # Opt-in (--monitor / EARSHOT_MONITOR=1): the stereo monitor is a pure
   # convenience copy that doubles the meeting's disk footprint.
   # -ac 1 downmixes each input regardless of its native channel count.
@@ -849,20 +875,27 @@ cmd_record() {
   local FAR_CH NEAR_CH
   FAR_CH="$(ffprobe -v error -show_entries stream=channels -of default=nw=1:nk=1 "${FAR}" 2>/dev/null || echo "?")"
   NEAR_CH="$(ffprobe -v error -show_entries stream=channels -of default=nw=1:nk=1 "${NEAR}" 2>/dev/null || echo "?")"
+  local MODE="call" FAR_DEV="${BLACKHOLE_NAME}"
+  local NEAR_DEV="\"${NEAR_NAME}\"" NEAR_CHJ="\"${NEAR_CH}\"" NEAR_FILE='"near_me.wav"'
+  if [ "${INPERSON}" = "1" ]; then
+    MODE="in-person"; FAR_DEV="${NEAR_NAME}"
+    NEAR_DEV=null; NEAR_CHJ=null; NEAR_FILE=null
+  fi
   cat > "${MEET_DIR}/meeting.json" <<EOF
 {
   "title": "$(json_escape "${TITLE:-}")",
   "profile": "${PROFILE}",
-  "far_device": "${BLACKHOLE_NAME}",
-  "near_device": "${NEAR_NAME}",
+  "mode": "${MODE}",
+  "far_device": "${FAR_DEV}",
+  "near_device": ${NEAR_DEV},
   "sample_rate": ${RATE},
   "far_channels": "${FAR_CH}",
-  "near_channels": "${NEAR_CH}",
+  "near_channels": ${NEAR_CHJ},
   "started_at": "${START_TS}",
   "ended_at": "${END_TS}",
   "files": {
     "far_remote": "far_remote.wav",
-    "near_me": "near_me.wav",
+    "near_me": ${NEAR_FILE},
     "monitor_stereo": $( [ -f "${MON}" ] && echo '"monitor_stereo.wav"' || echo null )
   }
 }
@@ -876,8 +909,12 @@ EOF
   fi
 
   echo "earshot: done."
-  echo "  far_remote.wav     (the call, everyone but you)"
-  echo "  near_me.wav        (your mic)"
+  if [ "${INPERSON}" = "1" ]; then
+    echo "  far_remote.wav     (the whole room, you included)"
+  else
+    echo "  far_remote.wav     (the call, everyone but you)"
+    echo "  near_me.wav        (your mic)"
+  fi
   [ -f "${MON}" ] && echo "  monitor_stereo.wav (L=remote, R=you) for a quick listen"
   echo "  -> ${MEET_DIR}"
   # thinkkit pairing contract: the notes file points at the capture dir,

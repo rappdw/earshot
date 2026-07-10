@@ -66,16 +66,30 @@ def unidentified_labels(transcript):
     return sorted(l for l in labels if l and REMOTE_RE.match(l))
 
 
-def _far_text_at(transcript, start, end):
-    """Best-effort transcript text overlapping [start, end] on the far channel."""
+def _far_text_at(transcript, start, end, label=None):
+    """Transcript text for the far channel inside [start, end].
+
+    Prefer segments already carrying `label`: the clip window routinely
+    grazes the tail of the PREVIOUS speaker's segment by a fraction of a
+    second, and that graze must not supply the hint for a clip of someone
+    else. Without any labeled segment in the window, fall back to the
+    largest-overlap segment rather than the first."""
+    cands = []
     for s in transcript.get("segments", []):
         if s.get("channel") != "far" or not s.get("text"):
             continue
         ss = float(s.get("start") or 0.0)
         se = float(s.get("end") or ss)
-        if min(end, se) - max(start, ss) > 0:
-            return s["text"].strip()
-    return ""
+        ov = min(end, se) - max(start, ss)
+        if ov > 0:
+            cands.append((ov, ss, s))
+    if not cands:
+        return ""
+    mine = sorted((c for c in cands if c[2].get("speaker") == label),
+                  key=lambda c: c[1])
+    if mine:
+        return " ".join(c[2]["text"].strip() for c in mine)
+    return max(cands, key=lambda c: c[0])[2]["text"].strip()
 
 
 def sample_segment(transcript, label, max_dur):
@@ -105,7 +119,7 @@ def sample_segment(transcript, label, max_dur):
         best = max(scands, key=lambda s: (s["end"] - s["start"]))
         start = float(best["start"])
     dur = max(min(float(max_dur), float(best["end"]) - start), 1.0)
-    return start, dur, _far_text_at(transcript, start, start + dur)
+    return start, dur, _far_text_at(transcript, start, start + dur, label)
 
 
 def extract_clip(far, start, dur):

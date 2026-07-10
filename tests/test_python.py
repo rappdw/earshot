@@ -186,6 +186,23 @@ class TestAttribute(unittest.TestCase):
         self.assertEqual(start, 100.0)
         self.assertEqual(dur, 8.0)
 
+    def test_sample_hint_skips_grazing_previous_speaker(self):
+        # REMOTE-1's segment tail grazes the [20,24] clip window by 0.5s and
+        # sorts first; the printed hint must still be REMOTE-2's own text
+        t = _attr_transcript()
+        t["segments"][1]["end"] = 20.5
+        _, _, text = attribute.sample_segment(t, "REMOTE-2", 8.0)
+        self.assertEqual(text, "x")
+
+    def test_sample_hint_falls_back_to_biggest_overlap(self):
+        # no segment in the window carries the label: use the largest
+        # overlap, not the first grazing segment
+        t = _attr_transcript()
+        t["segments"][2]["speaker"] = "Sara"
+        t["segments"][1]["end"] = 20.5
+        _, _, text = attribute.sample_segment(t, "REMOTE-2", 8.0)
+        self.assertEqual(text, "x")
+
     def test_sample_falls_back_to_segments_without_turns(self):
         t = _attr_transcript()
         t["diarization"]["turns"] = []

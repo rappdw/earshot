@@ -342,6 +342,29 @@ class TestTranscribe(unittest.TestCase):
             self.assertEqual(
                 jobs, [(os.path.join(d, "far_remote.wav"), "REMOTE", "far")])
 
+    def test_resolve_batch_size_auto_and_explicit(self):
+        # auto: batch on CUDA, sequential on CPU
+        self.assertEqual(transcribe.resolve_batch_size(None, "cuda"), 8)
+        self.assertEqual(transcribe.resolve_batch_size(None, "cpu"), 0)
+        # explicit wins, including forcing sequential with 0
+        self.assertEqual(transcribe.resolve_batch_size(0, "cuda"), 0)
+        self.assertEqual(transcribe.resolve_batch_size(16, "cpu"), 16)
+
+    def test_transcribe_channel_routes_batched_vs_sequential(self):
+        info = mock.Mock(language="en", language_probability=0.99)
+        seq = mock.Mock(); seq.transcribe.return_value = ([], info)
+        bat = mock.Mock(); bat.transcribe.return_value = ([], info)
+        args = mock.Mock(language=None, beam_size=5)
+        # batch_size > 0 with a pipeline -> batched path, no vad_filter kwarg
+        transcribe.transcribe_channel(seq, bat, 8, "a.wav", "R", "far", args, None)
+        bat.transcribe.assert_called_once()
+        self.assertEqual(bat.transcribe.call_args.kwargs["batch_size"], 8)
+        seq.transcribe.assert_not_called()
+        # batch_size 0 -> sequential path with vad_filter
+        transcribe.transcribe_channel(seq, bat, 0, "a.wav", "R", "far", args, None)
+        seq.transcribe.assert_called_once()
+        self.assertTrue(seq.transcribe.call_args.kwargs["vad_filter"])
+
     def test_write_outputs_schema_and_languages(self):
         with tempfile.TemporaryDirectory() as d:
             args = mock.Mock(meeting_dir=d, file=None, model="large-v3")

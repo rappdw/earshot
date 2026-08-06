@@ -547,7 +547,7 @@ cmd_offload() {
     fi
 
     # build the remote pipeline (run from inside RDIR; '.' is the meeting dir)
-    local parts="" tokenline="" apikeyline="" speakersline="" promptline="" nameline=""
+    local parts="" tokenline="" apikeyline="" speakersline="" promptline="" nameline="" modelline=""
     # forward HF_TOKEN for both steps: transcribe downloads the Whisper model
     # from the HF Hub too, and warns / rate-limits without a token.
     [ -n "${HF_TOKEN:-}" ] && tokenline="export HF_TOKEN='${HF_TOKEN}'"
@@ -555,6 +555,8 @@ cmd_offload() {
     [ -n "${ANTHROPIC_API_KEY:-}" ] && apikeyline="export ANTHROPIC_API_KEY='${ANTHROPIC_API_KEY}'"
     # your own-channel label travels with the job
     [ -n "${EARSHOT_MY_NAME:-}" ] && nameline="export EARSHOT_MY_NAME='${EARSHOT_MY_NAME}'"
+    # the Whisper model choice (e.g. large-v3-turbo) travels with the job too
+    [ -n "${EARSHOT_WHISPER_MODEL:-}" ] && modelline="export EARSHOT_WHISPER_MODEL='${EARSHOT_WHISPER_MODEL}'"
     if [ "${DO_TX}" -eq 1 ]; then
       # push the glossary so remote transcription gets the same jargon biasing
       if [ -n "${EARSHOT_PROMPT_FILE:-}" ] && [ -f "${EARSHOT_PROMPT_FILE}" ]; then
@@ -587,6 +589,7 @@ rm -f -- "\$0" .status
 ${tokenline}
 ${apikeyline}
 ${nameline}
+${modelline}
 ${promptline}
 ${speakersline}
 ( ${parts} ) 2>&1 | tee run.log

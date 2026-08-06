@@ -65,7 +65,7 @@ RUN if [ "${CT2_CUDA}" = "1" ]; then \
 RUN python -c "import torch; print('torch=='+torch.__version__)" > /tmp/constraints.txt && \
     (python -c "import ctranslate2; print('ctranslate2=='+ctranslate2.__version__)" >> /tmp/constraints.txt || true) && \
     pip install --no-cache-dir -c /tmp/constraints.txt \
-      "huggingface_hub<1.0" "faster-whisper>=1.0.3,<2" "pyannote.audio>=3.1,<4" && \
+      "huggingface_hub<1.0" "faster-whisper>=1.1.0,<2" "pyannote.audio>=3.1,<4" && \
     TMINOR="$(python -c 'import torch; v=torch.__version__.split("+")[0].split("."); print(v[0]+"."+v[1])')" && \
     echo "force-installing CPU torchaudio==${TMINOR}.* (no-deps) over the CUDA-13 wheel" && \
     pip install --no-cache-dir --no-deps --force-reinstall \
@@ -79,6 +79,7 @@ RUN python -c "import torch; print('torch=='+torch.__version__)" > /tmp/constrai
 RUN python - <<'PY'
 import importlib.metadata as m
 import ctranslate2, faster_whisper, torchaudio
+from faster_whisper import BatchedInferencePipeline  # noqa: F401 - batched GPU transcription (>=1.1)
 from pyannote.audio import Pipeline  # noqa: F401 - the import chain that broke twice
 hub = m.version("huggingface_hub")
 assert int(hub.split(".")[0]) < 1, f"huggingface_hub {hub} >= 1.0 breaks pyannote (use_auth_token)"

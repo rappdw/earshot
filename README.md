@@ -222,6 +222,18 @@ environment on NVIDIA's NGC base, no torch fiddling), see
 [`docker/README.md`](docker/README.md). It's a drop-in: build the image on the
 host and point `EARSHOT_SPARK_EARSHOT` at the `earshot-container` wrapper.
 
+**Transcription speed (long meetings).** On CUDA, earshot uses faster-whisper's
+batched pipeline automatically — it feeds many audio chunks through the GPU at
+once instead of one sequential decode step at a time (the difference between the
+GPU running busy-but-starved and running full). Two more levers for multi-hour
+recordings:
+
+- `EARSHOT_WHISPER_MODEL="large-v3-turbo"` — roughly 4x faster than `large-v3`
+  for a small accuracy cost. Set it in the config; it travels with offload jobs.
+- `--tx-args "--batch-size 16"` (via `offload`/`process`) raises the batch size
+  from the default 8; bigger is faster on long audio until you run out of
+  memory. `--batch-size 0` forces the old sequential path.
+
 ## Hugging Face setup (for diarization)
 
 1. Create a free token: https://huggingface.co/settings/tokens

@@ -65,16 +65,35 @@ def load_prompt(args):
     return text or None
 
 
-def transcribe_channel(model, path, speaker, channel, args, prompt):
-    """Run one channel; return a list of segment dicts tagged with speaker."""
-    segments, info = model.transcribe(
-        path,
+def resolve_batch_size(requested, device):
+    """Batch size for batched inference. requested None (or <0) -> auto: batch
+    on CUDA (fills the GPU, far faster on long audio), sequential on CPU. An
+    explicit >= 0 wins, so --batch-size 0 forces the sequential path."""
+    if requested is not None and requested >= 0:
+        return requested
+    return 8 if device == "cuda" else 0
+
+
+def transcribe_channel(model, batched, batch_size, path, speaker, channel, args, prompt):
+    """Run one channel; return a list of segment dicts tagged with speaker.
+
+    With batch_size > 0 the batched pipeline runs many VAD chunks through the
+    GPU at once - much higher throughput on multi-hour audio, where the
+    sequential decode loop leaves the GPU starved. Falls back to the
+    sequential path (which we still use on CPU) otherwise."""
+    common = dict(
         language=args.language,            # None -> autodetect
         beam_size=args.beam_size,
-        vad_filter=True,                   # drop silence / reduce spurious text
         word_timestamps=True,              # words kept for Stage 4 alignment
         initial_prompt=prompt,
     )
+    if batched is not None and batch_size > 0:
+        # the batched pipeline runs VAD internally (required for chunking), so
+        # vad_filter is implicit here; drops silence just like the seq path.
+        segments, info = batched.transcribe(path, batch_size=batch_size, **common)
+    else:
+        segments, info = model.transcribe(
+            path, vad_filter=True, **common)  # vad drops silence / spurious text
     out = []
     for seg in segments:
         words = None
@@ -173,7 +192,13 @@ def main():
     ap.add_argument("meeting_dir", nargs="?", help="meeting folder with near_me.wav / far_remote.wav")
     ap.add_argument("--file", help="transcribe a single arbitrary audio file instead")
     ap.add_argument("--speaker", help="speaker label for --file mode (default SPEAKER)")
-    ap.add_argument("--model", default="large-v3", help="model size or path (default large-v3)")
+    ap.add_argument("--model", default=os.environ.get("EARSHOT_WHISPER_MODEL") or "large-v3",
+                    help="model size or path (default large-v3, or $EARSHOT_WHISPER_MODEL). "
+                         "large-v3-turbo is ~4x faster with a small accuracy cost.")
+    ap.add_argument("--batch-size", dest="batch_size", type=int, default=None,
+                    help="batched-inference batch size on CUDA (0 = sequential decode; "
+                         "default auto: 8 on CUDA, 0 on CPU). Larger is faster on long "
+                         "audio at the cost of memory.")
     ap.add_argument("--device", default="auto", help="auto | cpu | cuda")
     ap.add_argument("--compute-type", dest="compute_type", default="auto",
                     help="auto | int8 | int8_float16 | float16 | float32")
@@ -191,16 +216,31 @@ def main():
     compute_type = pick_compute_type(args.compute_type, device)
     prompt = load_prompt(args)
 
-    print(f"earshot-transcribe: model={args.model} device={device} compute={compute_type}",
-          file=sys.stderr)
     model = WhisperModel(args.model, device=device, compute_type=compute_type)
+
+    # Batched inference (faster-whisper >= 1.1) fills the GPU; fall back to the
+    # sequential path with a clear note if the installed version lacks it.
+    batch_size = resolve_batch_size(args.batch_size, device)
+    batched = None
+    if batch_size > 0:
+        try:
+            from faster_whisper import BatchedInferencePipeline
+            batched = BatchedInferencePipeline(model=model)
+        except Exception as e:
+            print(f"earshot-transcribe: batched inference unavailable ({e}); using "
+                  f"sequential decode. Upgrade faster-whisper to >=1.1 for the speedup.",
+                  file=sys.stderr)
+            batch_size = 0
+    mode = f"batched(bs={batch_size})" if batch_size > 0 else "sequential"
+    print(f"earshot-transcribe: model={args.model} device={device} "
+          f"compute={compute_type} {mode}", file=sys.stderr)
 
     jobs = resolve_inputs(args)
     all_segments = []
     languages = {}
     for path, speaker, channel in jobs:
         print(f"earshot-transcribe: {channel} -> {speaker}: {path}", file=sys.stderr)
-        segs, info = transcribe_channel(model, path, speaker, channel, args, prompt)
+        segs, info = transcribe_channel(model, batched, batch_size, path, speaker, channel, args, prompt)
         languages[channel] = info.language
         all_segments.extend(segs)
         print(f"  {len(segs)} segments (lang={info.language} "

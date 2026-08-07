@@ -119,9 +119,14 @@ earshot timing DIR                    # transcript-vs-audio alignment check
 earshot help
 ```
 
-A recording stops on **Enter**, on **Ctrl-C**, or **automatically** after a
-sustained silence on the call channel (a meeting that has ended). See
-`earshot rec -h` and the config for the auto-stop knobs.
+A recording stops on **Enter**, on **Ctrl-C**, or **automatically** once
+**both** channels (the call and your mic) have been silent for the auto-stop
+window, i.e. the meeting has actually gone quiet. Watching both sides means a
+long monologue (you presenting while everyone else is muted) no longer cuts the
+recording off early. `meeting.json` records the `stop_reason`
+(`manual`/`silence`/`max-duration`/`interrupted`/`recorder-exited`) and
+`duration_sec`, so an unexpectedly short recording is easy to diagnose after the
+fact. See `earshot rec -h` and the config for the auto-stop knobs.
 
 **In-person meetings:** `earshot rec --in-person` records only the mic, into
 the far channel, because a room mic hears everyone (you included). No

@@ -24,7 +24,8 @@
 #   -t, --title      meeting title; used in the folder name. Prompts if omitted.
 #   -o, --out        output root dir; overrides the context. Default from config.
 #   -r, --rate       sample rate. Default from config (48000).
-#   --auto-stop N    stop after N sec of call-audio silence (default from config)
+#   --auto-stop N    stop after N sec with BOTH you and the call silent
+#                    (in-person: room silence). Default from config.
 #   --no-auto-stop   disable silence auto-stop for this recording
 #   --max-min N      hard cap recording length in minutes (0 = no cap)
 #   --monitor        also write monitor_stereo.wav (off by default; doubles disk)
@@ -40,8 +41,9 @@
 #
 # Capture records BlackHole and your mic as two parallel ffmpeg processes,
 # resolved BY NAME (--in-person records just the mic). A recording stops on
-# Enter, on Ctrl-C, or automatically after a sustained silence on the recorded
-# channel (a meeting that has ended).
+# Enter, on Ctrl-C, or automatically once BOTH channels have been silent for the
+# auto-stop window (a meeting that has ended). meeting.json records the
+# stop_reason (manual|silence|max-duration|interrupted|recorder-exited).
 # ==help-end==
 
 set -euo pipefail
@@ -781,9 +783,14 @@ cmd_record() {
   # When auto-stop is on, silencedetect on the recorded channel logs a
   # "silence_start" line once it has been silent for AUTOSTOP seconds (a
   # passthrough filter, so far_remote.wav is unchanged).
-  local far_af=""
+  # silencedetect is analysis-only (passthrough), so it never alters the audio.
+  # We put it on BOTH channels: auto-stop must see the WHOLE meeting go quiet,
+  # not just the call. (Far-only would cut off a long monologue - you presenting
+  # while everyone is muted makes the call channel silent, which is not an
+  # ended meeting.) In-person has one channel and relies on it alone.
+  local sil_af=""
   if [ "${AUTOSTOP}" -gt 0 ] 2>/dev/null; then
-    far_af="-af silencedetect=noise=${SILENCE_DB}:d=${AUTOSTOP}"
+    sil_af="-af silencedetect=noise=${SILENCE_DB}:d=${AUTOSTOP}"
   fi
   # In-person, the room mic carries everyone (you included), so it records
   # into the far slot: the channel the pipeline diarizes and attributes.
@@ -791,12 +798,13 @@ cmd_record() {
   [ "${INPERSON}" = "1" ] && REC_IDX="${NEAR_IDX}"
   # shellcheck disable=SC2086
   ffmpeg -hide_banner -nostdin -y -f avfoundation -i ":${REC_IDX}" \
-    ${far_af} -c:a pcm_s16le -ar "${RATE}" "${FAR}" </dev/null >"${FAR_LOG}" 2>&1 &
+    ${sil_af} -c:a pcm_s16le -ar "${RATE}" "${FAR}" </dev/null >"${FAR_LOG}" 2>&1 &
   local FAR_PID=$!
   local NEAR_PID=""
   if [ "${INPERSON}" != "1" ]; then
+    # shellcheck disable=SC2086
     ffmpeg -hide_banner -nostdin -y -f avfoundation -i ":${NEAR_IDX}" \
-      -c:a pcm_s16le -ar "${RATE}" "${NEAR}" </dev/null >"${NEAR_LOG}" 2>&1 &
+      ${sil_af} -c:a pcm_s16le -ar "${RATE}" "${NEAR}" </dev/null >"${NEAR_LOG}" 2>&1 &
     NEAR_PID=$!
   fi
 
@@ -807,15 +815,29 @@ cmd_record() {
 
   echo "earshot: recording... press Enter to stop (or Ctrl-C)."
   if [ "${AUTOSTOP}" -gt 0 ] 2>/dev/null; then
-    local SIL_SRC="call-audio"
-    [ "${INPERSON}" = "1" ] && SIL_SRC="room"
-    echo "earshot: will auto-stop after ${AUTOSTOP}s of ${SIL_SRC} silence (--no-auto-stop to disable)."
+    if [ "${INPERSON}" = "1" ]; then
+      echo "earshot: will auto-stop after ${AUTOSTOP}s of room silence (--no-auto-stop to disable)."
+    else
+      echo "earshot: will auto-stop after ${AUTOSTOP}s with BOTH you and the call silent (--no-auto-stop to disable)."
+    fi
   fi
   [ "${MAX_MIN}" -gt 0 ] 2>/dev/null && echo "earshot: hard cap ${MAX_MIN} min."
 
-  # Watch loop: stop on Enter, on sustained call silence, on max duration, or if
-  # ffmpeg dies. Ctrl-C/TERM still works via the trap.
-  local t0=$SECONDS stop_reason="ended"
+  # channel_silent LOG -> echoes 1 if that channel is CURRENTLY in a sustained
+  # (>= AUTOSTOP) silence: silencedetect logs one silence_start when a silence
+  # crosses the duration threshold and one silence_end when it lifts, so more
+  # starts than ends means the latest silence is still ongoing.
+  channel_silent() {
+    local ss se
+    ss="$(grep -c "silence_start" "$1" 2>/dev/null)" || ss=0
+    se="$(grep -c "silence_end"   "$1" 2>/dev/null)" || se=0
+    [ "${ss:-0}" -gt "${se:-0}" ] && echo 1 || echo 0
+  }
+
+  # Watch loop: stop on Enter, on sustained silence (BOTH channels), on max
+  # duration, or if a recorder dies (falls through as "recorder-exited").
+  # Ctrl-C/TERM still works via the trap.
+  local t0=$SECONDS stop_reason="recorder-exited"
   while kill -0 "${FAR_PID}" 2>/dev/null \
         && { [ -z "${NEAR_PID}" ] || kill -0 "${NEAR_PID}" 2>/dev/null; }; do
     if [ -r /dev/tty ]; then
@@ -823,19 +845,33 @@ cmd_record() {
     else
       sleep 2
     fi
-    # Stop only if we are CURRENTLY in a sustained silence: more silence_start
-    # than silence_end means the latest silence (>= AUTOSTOP secs) has not ended.
+    # Auto-stop only when the meeting has actually gone quiet: the far (call)
+    # channel AND the near (your mic) channel both in sustained silence. A long
+    # monologue keeps one side active, so it no longer cuts you off. In-person
+    # has no near channel, so the room mic decides alone.
     if [ "${AUTOSTOP}" -gt 0 ] 2>/dev/null; then
-      local ss se
-      ss="$(grep -c "silence_start" "${FAR_LOG}" 2>/dev/null)" || ss=0
-      se="$(grep -c "silence_end" "${FAR_LOG}" 2>/dev/null)" || se=0
-      if [ "${ss:-0}" -gt "${se:-0}" ]; then stop_reason="silence"; break; fi
+      if [ "$(channel_silent "${FAR_LOG}")" = "1" ] \
+         && { [ -z "${NEAR_PID}" ] || [ "$(channel_silent "${NEAR_LOG}")" = "1" ]; }; then
+        stop_reason="silence"; break
+      fi
     fi
     if [ "${MAX_MIN}" -gt 0 ] 2>/dev/null && [ "$(( SECONDS - t0 ))" -ge "$(( MAX_MIN * 60 ))" ]; then
       stop_reason="max-duration"; break
     fi
   done
+  local DURATION_SEC=$(( SECONDS - t0 ))
   echo "earshot: stopping (${stop_reason})."
+
+  # A recorder exiting on its own (not one of our stop reasons) almost always
+  # means an audio device disconnected or CoreAudio reconfigured mid-recording
+  # (headphones/AirPods swapped, output device changed, USB blip). Surface it
+  # loudly with the log tail instead of letting it look like a clean end.
+  if [ "${stop_reason}" = "recorder-exited" ]; then
+    echo "earshot: WARNING a recorder stopped on its own - a capture device may have" >&2
+    echo "  disconnected or the audio setup changed mid-recording. Recent log:" >&2
+    tail -n 6 "${FAR_LOG}" >&2 2>/dev/null || true
+    [ -n "${NEAR_PID}" ] && tail -n 6 "${NEAR_LOG}" >&2 2>/dev/null || true
+  fi
 
   stop_recording
   wait "${FAR_PID}" 2>/dev/null || true
@@ -854,6 +890,22 @@ cmd_record() {
     echo "earshot: WARNING near_me.wav is empty (mic may be held exclusively by the meeting app). Tail of capture log:" >&2
     tail -n 5 "${NEAR_LOG}" >&2 || true
     fail=1
+  fi
+
+  # A far channel that recorded but is essentially silent almost always means
+  # the call audio was never routed in (BlackHole not set as the meeting app's
+  # output, or the wrong Multi-Output). The file isn't empty, so the check above
+  # misses it. Sample up to 5 min (cheap on long meetings) and warn if the peak
+  # is near digital silence; advisory only. Skipped in-person (far = the room).
+  if [ "${INPERSON}" != "1" ] && [ -s "${FAR}" ]; then
+    local FAR_MAXVOL
+    FAR_MAXVOL="$(ffmpeg -hide_banner -nostats -t 300 -i "${FAR}" -af volumedetect -f null - 2>&1 \
+                  | sed -n 's/.*max_volume: \(-*[0-9.]*\) dB.*/\1/p' | head -1)"
+    if [ -n "${FAR_MAXVOL}" ] && awk -v v="${FAR_MAXVOL}" 'BEGIN{exit !(v <= -70)}'; then
+      echo "earshot: WARNING the call (far) channel is essentially silent (peak ${FAR_MAXVOL} dB)." >&2
+      echo "  If this was a remote call, its audio was NOT captured. Set the meeting app's" >&2
+      echo "  OUTPUT (and macOS Output) to the Multi-Output device that feeds BlackHole." >&2
+    fi
   fi
 
   if [ "${MONITOR}" = "1" ] && [ "${INPERSON}" = "1" ]; then
@@ -896,6 +948,8 @@ cmd_record() {
   "near_channels": ${NEAR_CHJ},
   "started_at": "${START_TS}",
   "ended_at": "${END_TS}",
+  "duration_sec": ${DURATION_SEC},
+  "stop_reason": "${stop_reason}",
   "files": {
     "far_remote": "far_remote.wav",
     "near_me": ${NEAR_FILE},

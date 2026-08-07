@@ -26,7 +26,12 @@ cat > "${STUB}/ffmpeg" <<'EOF'
 # exit 0 so rec's happy path is exercisable
 case "$*" in
   *avfoundation*pcm_s16le*)
+    [ -n "${FFCAP_LOG:-}" ] && echo "$*" >> "${FFCAP_LOG}"
     out="${!#}"; head -c 4096 /dev/zero > "$out"; exit 0 ;;
+  *volumedetect*)
+    # emit a max_volume line only when the test sets FF_MAXVOL (far-silence check)
+    [ -n "${FF_MAXVOL:-}" ] && echo "[Parsed_volumedetect_0 @ 0x0] max_volume: ${FF_MAXVOL} dB" >&2
+    exit 0 ;;
 esac
 # otherwise: device-listing stub, canned avfoundation list on stderr
 cat >&2 <<'DEV'
@@ -99,10 +104,29 @@ check "first candidate wins when present" "near 'OBSBOT Meet Microphone' (index 
 OUT="$("${EARSHOT}" rec -p only4k -t t2 -o "${WORK}/rec2" 2>&1 </dev/null || true)"
 check "falls through to next candidate" "near 'OBSBOT Meet 4K Microphone' (index 4)" "$OUT"
 OUT="$(EARSHOT_CONF="${CONF}" "${EARSHOT}" rec -p obsbot -t t3 -o "${WORK}/rec3" 2>&1 </dev/null || true)"
+OUT3="${OUT}"   # preserve rec3 output; later blocks reassign OUT
 J="$(cat "${WORK}"/rec3/*/meeting.json 2>/dev/null)"
 check "meeting.json records the resolved name, not the list" '"near_device": "OBSBOT Meet Microphone"' "$J"
 check "meeting.json mode is call for two-channel" '"mode": "call"' "$J"
+check "meeting.json records a stop_reason" '"stop_reason":' "$J"
+check "meeting.json records duration_sec" '"duration_sec":' "$J"
 check "recording succeeded via stub" "earshot: done." "$OUT"
+
+echo "[rec] auto-stop watches BOTH channels (silencedetect on far and near)"
+FFCAP="${WORK}/ffcap.log"; : > "${FFCAP}"
+FFCAP_LOG="${FFCAP}" "${EARSHOT}" rec -p obsbot -t sil -o "${WORK}/recsil" 2>&1 </dev/null >/dev/null || true
+NSIL="$(grep -c "silencedetect" "${FFCAP}" 2>/dev/null)" || NSIL=0
+check "both capture processes carry silencedetect" "2" "${NSIL}"
+FFCAP2="${WORK}/ffcap2.log"; : > "${FFCAP2}"
+FFCAP_LOG="${FFCAP2}" "${EARSHOT}" rec --in-person -p obsbot -t silip -o "${WORK}/recsilip" 2>&1 </dev/null >/dev/null || true
+NSIL2="$(grep -c "silencedetect" "${FFCAP2}" 2>/dev/null)" || NSIL2=0
+check "in-person carries silencedetect on its single channel" "1" "${NSIL2}"
+
+echo "[rec] warns when the far (call) channel captured no audio"
+OUT="$(FF_MAXVOL="-91.0" "${EARSHOT}" rec -p obsbot -t dead -o "${WORK}/recdead" 2>&1 </dev/null || true)"
+check "far-silence warning fires on a dead call channel" "call (far) channel is essentially silent" "$OUT"
+OUT="$(FF_MAXVOL="-12.0" "${EARSHOT}" rec -p obsbot -t live -o "${WORK}/reclive" 2>&1 </dev/null || true)"
+check_not "no far-silence warning when the call channel is audible" "essentially silent" "$OUT"
 check "monitor is off by default (json null)" '"monitor_stereo": null' "$J"
 M3D="$(find "${WORK}/rec3" -mindepth 1 -maxdepth 1 -type d | head -1)"
 if [ -n "${M3D}" ] && [ ! -f "${M3D}/monitor_stereo.wav" ]; then
@@ -110,7 +134,7 @@ if [ -n "${M3D}" ] && [ ! -f "${M3D}/monitor_stereo.wav" ]; then
 else
   fail "no monitor file by default"
 fi
-check "stop prints the take-notes pairing pointer" "**Recording**: ${M3D}/" "$OUT"
+check "stop prints the take-notes pairing pointer" "**Recording**: ${M3D}/" "$OUT3"
 
 echo "[rec] --in-person records the mic into the far slot (no call-audio device)"
 OUT="$(EARSHOT_BLACKHOLE_NAME="No Such Device" "${EARSHOT}" rec --in-person -p obsbot -t t9 -o "${WORK}/rec9" 2>&1 </dev/null || true)"

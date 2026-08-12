@@ -326,21 +326,83 @@ class TestTranscribe(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             open(os.path.join(d, "far_remote.flac"), "w").close()
             open(os.path.join(d, "near_me.wav"), "w").close()
-            args = mock.Mock(file=None, meeting_dir=d, speaker=None)
-            with mock.patch.dict(os.environ, {"EARSHOT_MY_NAME": "Dan"}):
-                jobs = transcribe.resolve_inputs(args)
+            args = mock.Mock(file=None, meeting_dir=d, speaker=None, channels="both")
+            with mock.patch.dict(os.environ, {"EARSHOT_MY_NAME": "Dan"}), \
+                 mock.patch.object(transcribe, "channel_peak_db", return_value=-12.0):
+                jobs, skipped = transcribe.resolve_inputs(args)
             chans = {c: (os.path.basename(p), s) for p, s, c in jobs}
             self.assertEqual(chans["near"], ("near_me.wav", "Dan"))
             self.assertEqual(chans["far"], ("far_remote.flac", "REMOTE"))
+            self.assertEqual(skipped, {})
 
     def test_resolve_inputs_far_only_in_person(self):
         # in-person captures have no near channel; far alone must transcribe
         with tempfile.TemporaryDirectory() as d:
             open(os.path.join(d, "far_remote.wav"), "w").close()
-            args = mock.Mock(file=None, meeting_dir=d, speaker=None)
-            jobs = transcribe.resolve_inputs(args)
+            args = mock.Mock(file=None, meeting_dir=d, speaker=None, channels="both")
+            jobs, _ = transcribe.resolve_inputs(args)
             self.assertEqual(
                 jobs, [(os.path.join(d, "far_remote.wav"), "REMOTE", "far")])
+
+    def test_resolve_inputs_skips_a_silent_channel(self):
+        # a misrouted call channel recorded nothing: skip it, keep the mic
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "far_remote.wav"), "w").close()
+            open(os.path.join(d, "near_me.wav"), "w").close()
+            args = mock.Mock(file=None, meeting_dir=d, speaker=None, channels="both")
+            peaks = {"far_remote.wav": -91.0, "near_me.wav": -9.0}
+            with mock.patch.object(transcribe, "channel_peak_db",
+                                   side_effect=lambda p, **k: peaks[os.path.basename(p)]):
+                jobs, skipped = transcribe.resolve_inputs(args)
+            self.assertEqual([c for _, _, c in jobs], ["near"])
+            self.assertIn("far", skipped)
+
+    def test_resolve_inputs_keeps_a_lone_quiet_channel(self):
+        # only one channel exists: transcribe it even if quiet, never nothing
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "far_remote.wav"), "w").close()
+            args = mock.Mock(file=None, meeting_dir=d, speaker=None, channels="both")
+            with mock.patch.object(transcribe, "channel_peak_db", return_value=-99.0):
+                jobs, skipped = transcribe.resolve_inputs(args)
+            self.assertEqual([c for _, _, c in jobs], ["far"])
+            self.assertEqual(skipped, {})
+
+    def test_resolve_inputs_channels_override(self):
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "far_remote.wav"), "w").close()
+            open(os.path.join(d, "near_me.wav"), "w").close()
+            args = mock.Mock(file=None, meeting_dir=d, speaker=None, channels="far")
+            jobs, _ = transcribe.resolve_inputs(args)
+            self.assertEqual([c for _, _, c in jobs], ["far"])
+
+    def test_harmonize_drops_speaker_bleed(self):
+        segs = [
+            {"channel": "far", "speaker": "REMOTE", "start": 10.0, "end": 14.0,
+             "text": "so the migration lands on Friday"},
+            # same words, same time, on the mic: the speakers bleeding in
+            {"channel": "near", "speaker": "Dan", "start": 10.1, "end": 13.9,
+             "text": "So the migration lands on Friday."},
+        ]
+        kept, dropped = transcribe.harmonize_channels(segs)
+        self.assertEqual(dropped, 1)
+        self.assertEqual([s["channel"] for s in kept], ["far"])
+
+    def test_harmonize_keeps_genuine_simultaneous_speech(self):
+        segs = [
+            {"channel": "far", "speaker": "REMOTE", "start": 10.0, "end": 14.0,
+             "text": "so the migration lands on Friday"},
+            {"channel": "near", "speaker": "Dan", "start": 10.5, "end": 12.0,
+             "text": "wait, that clashes with the audit"},
+        ]
+        kept, dropped = transcribe.harmonize_channels(segs)
+        self.assertEqual(dropped, 0)
+        self.assertEqual(len(kept), 2)
+
+    def test_harmonize_noop_without_far(self):
+        segs = [{"channel": "near", "speaker": "Dan", "start": 1.0, "end": 2.0,
+                 "text": "hello"}]
+        kept, dropped = transcribe.harmonize_channels(segs)
+        self.assertEqual((len(kept), dropped), (1, 0))
 
     def test_resolve_batch_size_auto_and_explicit(self):
         # auto: batch on CUDA, sequential on CPU

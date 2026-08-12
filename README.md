@@ -91,8 +91,12 @@ You need BlackHole wired so you can both *hear* a call and *capture* it.
    you use (e.g. `MultiOut-Dell`, `MultiOut-MBA`).
 2. **Per meeting**: set macOS Output (and the meeting app's Speaker) to the
    matching Multi-Output; set the app's Microphone to your real mic.
-3. **Wear headphones** when speaker labels matter. On speakers, remote audio
-   leaks into your mic and muddies the clean "just you" channel.
+3. **Headphones give the best speaker labels.** On speakers, remote audio leaks
+   into your mic, so the same words land on both channels. Transcription
+   harmonizes that bleed away (see below), which makes speaker-mode meetings
+   work fine; headphones just avoid the problem at the source. Either way the
+   call channel itself is unaffected: BlackHole is a digital tap, so
+   `far_remote.wav` is identical whether you wear headphones or not.
 
 No aggregate devices are needed; earshot records BlackHole and your mic as two
 parallel processes, resolved by device name.
@@ -226,6 +230,26 @@ the remote steps in a **CUDA container** instead of a venv (reproducible GPU
 environment on NVIDIA's NGC base, no torch fiddling), see
 [`docker/README.md`](docker/README.md). It's a drop-in: build the image on the
 host and point `EARSHOT_SPARK_EARSHOT` at the `earshot-container` wrapper.
+
+**Channel handling.** Transcription knows what the two channels mean and
+reconciles them:
+
+- A channel that **recorded nothing** (a misrouted call channel, or a mic the
+  meeting app held exclusively) is skipped, so it costs no GPU time and can't
+  hallucinate text out of noise. The last remaining channel is always
+  transcribed, quiet or not.
+- **Speaker bleed is harmonized away.** Without headphones your mic also picks
+  up the remote audio, so the same words land on both channels and the near copy
+  gets attributed to you. Near segments that overlap far speech *and* match its
+  text are dropped, keeping the far copy (the digital tap, always the better
+  audio). Genuine simultaneous speech, like interrupting or a backchannel,
+  survives because the text doesn't match. Disable with `--no-harmonize`.
+- `--channels far|near|both` forces the choice when you know better, and
+  `transcript.json` records what was transcribed, what was skipped and why, and
+  how many bleed segments were dropped.
+
+Headphones still give the cleanest result, since bleed never reaches the mic in
+the first place. This makes speaker-mode meetings usable, not equivalent.
 
 **Transcription speed (long meetings).** On CUDA, earshot uses faster-whisper's
 batched pipeline automatically — it feeds many audio chunks through the GPU at

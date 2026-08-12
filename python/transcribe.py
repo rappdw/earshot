@@ -10,6 +10,15 @@ model. Stage 4 subdivides REMOTE into individual speakers. In-person captures
 (rec --in-person) have only far_remote: whichever channels are present get
 transcribed, missing ones are skipped.
 
+Channel awareness (see resolve_inputs / harmonize_channels):
+  * a channel that recorded but is effectively silent is skipped, so a
+    misrouted call channel or a mic held by the meeting app costs no GPU time
+    and can't hallucinate text out of noise;
+  * without headphones your mic also picks up the remote audio from the
+    speakers, so the same words land on BOTH channels and the near copy gets
+    attributed to you. Harmonization drops near segments that duplicate an
+    overlapping far segment. far is the digital tap and always wins.
+
 Local-only note: the *audio* never leaves the machine. The only network access
 is a one-time download of the model weights from Hugging Face on first run;
 after that everything is offline. Pre-seed with HF_HUB_OFFLINE=0 once, then you
@@ -17,10 +26,20 @@ can run with no network.
 """
 
 import argparse
+import bisect
+import difflib
 import json
 import os
+import re
+import subprocess
 import sys
 import datetime as dt
+
+# A channel whose peak is at/below this (dBFS) counts as "recorded nothing".
+try:
+    SILENT_PEAK_DB = float(os.environ.get("EARSHOT_SILENT_DB") or -70.0)
+except ValueError:
+    SILENT_PEAK_DB = -70.0
 
 
 def pick_device(requested):
@@ -124,26 +143,117 @@ def find_audio(d, base):
     return None
 
 
+def channel_peak_db(path, sample_sec=300):
+    """Peak level (dBFS) of the first sample_sec of a channel, or None if it
+    can't be measured (no ffmpeg, unreadable file). Sampling keeps this cheap
+    on multi-hour meetings; a dead channel is dead from the first minute."""
+    try:
+        p = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-nostats", "-t", str(sample_sec),
+             "-i", path, "-af", "volumedetect", "-f", "null", "-"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False)
+    except Exception:
+        return None
+    m = re.search(r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB",
+                  p.stderr.decode("utf-8", "replace"))
+    return float(m.group(1)) if m else None
+
+
 def resolve_inputs(args):
-    """Return a list of (path, speaker, channel) to transcribe."""
+    """Return (jobs, skipped): jobs is a list of (path, speaker, channel) to
+    transcribe, skipped maps channel -> why it was left out."""
     jobs = []
+    skipped = {}
     if args.file:
         speaker = args.speaker or "SPEAKER"
         jobs.append((args.file, speaker, "single"))
-        return jobs
+        return jobs, skipped
     d = args.meeting_dir
     if not d or not os.path.isdir(d):
         sys.exit("error: pass a meeting directory or --file PATH")
     near = find_audio(d, "near_me")
     far = find_audio(d, "far_remote")
     me = os.environ.get("EARSHOT_MY_NAME", "").strip() or "YOU"
-    if near:
-        jobs.append((near, me, "near"))
-    if far:
-        jobs.append((far, "REMOTE", "far"))
-    if not jobs:
-        sys.exit(f"error: no near_me/far_remote audio (.wav/.flac) found in {d}")
-    return jobs
+    want = getattr(args, "channels", None) or "both"
+
+    cands = []
+    if near and want in ("both", "near"):
+        cands.append((near, me, "near"))
+    if far and want in ("both", "far"):
+        cands.append((far, "REMOTE", "far"))
+    if not cands:
+        sys.exit(f"error: no {want} audio (.wav/.flac) found in {d}")
+
+    # Only auto-skip when something else would still be transcribed: a single
+    # quiet channel is all we have, so transcribe it rather than return nothing.
+    for path, speaker, channel in cands:
+        peak = channel_peak_db(path) if len(cands) > 1 else None
+        if peak is not None and peak <= SILENT_PEAK_DB:
+            skipped[channel] = "silent (peak %.1f dB)" % peak
+            print(f"earshot-transcribe: skipping {channel} channel, it recorded "
+                  f"nothing (peak {peak:.1f} dB)", file=sys.stderr)
+            continue
+        jobs.append((path, speaker, channel))
+    if not jobs:  # every channel looked silent; transcribe anyway
+        print("earshot-transcribe: every channel looks silent; transcribing all "
+              "of them anyway", file=sys.stderr)
+        skipped = {}
+        jobs = list(cands)
+    return jobs, skipped
+
+
+def _norm_text(t):
+    return re.sub(r"[^a-z0-9 ]+", " ", (t or "").lower()).strip()
+
+
+def harmonize_channels(segments, ratio=0.8, min_overlap=0.5):
+    """Drop near-channel segments that duplicate overlapping far-channel text.
+
+    Without headphones the mic picks up the call audio from the speakers, so the
+    remote participants' words are transcribed twice: once cleanly on far, once
+    on near where they are wrongly attributed to you. Same time window plus the
+    same words means bleed, so the near copy goes and the far copy (the digital
+    tap, always the better audio) stays.
+
+    Conservative by construction: a near segment must overlap far speech for at
+    least min_overlap of its length AND match the text, so genuine simultaneous
+    speech (you talking over someone) survives. Returns (segments, dropped)."""
+    far = sorted((s for s in segments
+                  if s.get("channel") == "far" and s.get("start") is not None),
+                 key=lambda s: float(s["start"]))
+    if not far:
+        return segments, 0
+    starts = [float(s["start"]) for s in far]
+    kept, dropped = [], 0
+    for s in segments:
+        if s.get("channel") != "near" or not (s.get("text") or "").strip():
+            kept.append(s)
+            continue
+        ns = float(s.get("start") or 0.0)
+        ne = float(s.get("end") or ns)
+        dur = max(ne - ns, 1e-6)
+        # far segments are short; a bounded look-back finds every overlap
+        i = bisect.bisect_left(starts, ne) - 1
+        texts, ov_total = [], 0.0
+        while i >= 0 and starts[i] > ns - 60.0:
+            f = far[i]
+            fs = float(f["start"])
+            fe = float(f.get("end") or fs)
+            ov = min(ne, fe) - max(ns, fs)
+            if ov > 0:
+                ov_total += ov
+                texts.append(f.get("text") or "")
+            i -= 1
+        if min(ov_total / dur, 1.0) < min_overlap:
+            kept.append(s)
+            continue
+        a = _norm_text(s.get("text"))
+        b = _norm_text(" ".join(reversed(texts)))
+        if a and b and (a in b or difflib.SequenceMatcher(None, a, b).ratio() >= ratio):
+            dropped += 1
+            continue
+        kept.append(s)
+    return kept, dropped
 
 
 def write_outputs(args, all_segments, meta):
@@ -166,6 +276,7 @@ def write_outputs(args, all_segments, meta):
         "compute_type": meta["compute_type"],
         "language": meta["language"],
         "languages": meta.get("languages", {}),
+        "channels": meta.get("channels", {}),
         "generated_at": meta["generated_at"],
         "segments": all_segments,
     }
@@ -202,6 +313,12 @@ def main():
     ap.add_argument("--device", default="auto", help="auto | cpu | cuda")
     ap.add_argument("--compute-type", dest="compute_type", default="auto",
                     help="auto | int8 | int8_float16 | float16 | float32")
+    ap.add_argument("--channels", choices=("both", "far", "near"), default="both",
+                    help="which capture channels to transcribe (default both; a "
+                         "channel that recorded nothing is skipped automatically)")
+    ap.add_argument("--no-harmonize", dest="no_harmonize", action="store_true",
+                    help="keep near-channel segments that duplicate the call audio "
+                         "(speaker bleed); harmonization is on by default")
     ap.add_argument("--language", default=None, help="force a language code (e.g. en); default autodetect")
     ap.add_argument("--beam-size", dest="beam_size", type=int, default=5)
     ap.add_argument("--prompt", help="initial prompt to bias jargon/acronyms/names")
@@ -235,7 +352,7 @@ def main():
     print(f"earshot-transcribe: model={args.model} device={device} "
           f"compute={compute_type} {mode}", file=sys.stderr)
 
-    jobs = resolve_inputs(args)
+    jobs, skipped = resolve_inputs(args)
     all_segments = []
     languages = {}
     for path, speaker, channel in jobs:
@@ -252,11 +369,23 @@ def main():
 
     all_segments.sort(key=lambda s: (s["start"] if s["start"] is not None else 0.0))
 
+    # Harmonize the two channels: with both in hand, near segments that repeat
+    # overlapping far speech are speaker bleed, not you.
+    done = [c for _, _, c in jobs]
+    drops = 0
+    if not args.no_harmonize and "near" in done and "far" in done:
+        all_segments, drops = harmonize_channels(all_segments)
+        if drops:
+            print(f"earshot-transcribe: harmonized {drops} near-channel segment(s) "
+                  f"duplicating the call audio (speaker bleed)", file=sys.stderr)
+
     meta = {
         "device": device,
         "compute_type": compute_type,
         "language": detected_lang,
         "languages": languages,
+        "channels": {"transcribed": done, "skipped": skipped,
+                     "harmonized_drops": drops},
         "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
     }
     jpath, mpath = write_outputs(args, all_segments, meta)

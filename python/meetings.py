@@ -118,6 +118,7 @@ def cmd_list(args):
 # leave the folder alone; older ones are crashed recordings worth processing.
 IN_PROGRESS_SECS = 600
 MIN_AUDIO_BYTES = 1024   # a bare wav header or an aborted start is not audio
+IGNORE_MARKER = ".earshot-ignore"   # written by `earshot pending` -> ignore
 
 
 def channel_audio(d):
@@ -131,9 +132,10 @@ def channel_audio(d):
     return out
 
 
-def pending_meetings(now=None):
+def pending_meetings(now=None, include_ignored=False):
     """[(root, dir, info)] for meetings with usable audio but no transcript,
-    newest first. info carries what the listing shows."""
+    newest first. info carries what the listing shows. Meetings the user
+    chose to ignore are left out unless include_ignored."""
     now = time.time() if now is None else now
     out = []
     for root, d in meetings():
@@ -141,6 +143,9 @@ def pending_meetings(now=None):
             continue
         audio = channel_audio(d)
         if not audio:
+            continue
+        ignored = os.path.isfile(os.path.join(d, IGNORE_MARKER))
+        if ignored and not include_ignored:
             continue
         meta = {}
         mj = os.path.join(d, "meeting.json")
@@ -156,28 +161,37 @@ def pending_meetings(now=None):
             "duration_sec": meta.get("duration_sec"),
             "mode": meta.get("mode") or "call",
             "bytes": sum(os.path.getsize(p) for p in audio),
+            "ignored": ignored,
         }))
     return out
 
 
 def cmd_pending(args):
-    rows = pending_meetings()
+    rows = pending_meetings(include_ignored=args.all)
+    hidden = 0 if args.all else (
+        len(pending_meetings(include_ignored=True)) - len(rows))
     if args.paths:
         for _, d, _ in rows:
             print(d)
         return
+    note = (f"{hidden} ignored meeting(s) hidden (--all to show)" if hidden else "")
     if not rows:
-        print("nothing pending: every meeting with audio has a transcript")
+        print("nothing pending: every meeting with audio has a transcript"
+              + (f"; {note}" if note else ""))
         return
     print(f"{'meeting':44} {'ctx':9} {'mode':9} {'length':>8}  size")
     for root, d, info in rows:
         dur = info["duration_sec"]
         length = fmt_ts(dur) if isinstance(dur, (int, float)) else "?"
         print(f"{os.path.basename(d)[:44]:44} "
-              f"{os.path.basename(root.rstrip('/'))[:9]:9} {info['mode'][:9]:9} "
+              f"{os.path.basename(root.rstrip('/'))[:9]:9} "
+              f"{('ignored' if info['ignored'] else info['mode'])[:9]:9} "
               f"{length:>8}  {info['bytes'] / 1e6:5.0f}MB")
-    print(f"\n{len(rows)} meeting(s) untranscribed. "
+    active = sum(1 for _, _, i in rows if not i["ignored"])
+    print(f"\n{active} meeting(s) untranscribed. "
           "Walk through them: earshot pending --offload")
+    if note:
+        print(note)
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +289,8 @@ def main():
     p = sub.add_parser("pending", help="meetings with audio but no transcript")
     p.add_argument("--paths", action="store_true",
                    help="print one meeting directory per line (for scripts)")
+    p.add_argument("--all", action="store_true",
+                   help="include meetings marked ignored")
     p.set_defaults(fn=cmd_pending)
 
     p = sub.add_parser("grep", help="search transcripts (regex, case-insensitive)")

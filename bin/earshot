@@ -435,7 +435,9 @@ cmd_pending() {
         echo "       earshot pending --offload [-y] [ARGS]   offload them one by one"
         echo "       earshot pending --process [-y] [ARGS]   same, on this machine"
         echo "ARGS pass through to each offload/process run (e.g. --summarize)."
-        echo "-y runs every meeting without asking."
+        echo "Each meeting asks: transcribe / delete recording / ignore / quit."
+        echo "Ignore is permanent (marker file); 'earshot pending --all' still lists them."
+        echo "-y transcribes every meeting without asking (never deletes)."
         exit 0 ;;
       *) PASS+=("$1"); shift ;;
     esac
@@ -454,40 +456,79 @@ cmd_pending() {
     return 0
   fi
 
-  local tty="${EARSHOT_TTY:-/dev/tty}" i=0 ok=0 skipped=0 failed=0 ans
+  # The terminal is opened once on fd 3, so answers are read in order (and a
+  # test can script them); pipeline runs get fd 3 closed.
+  local tty="${EARSHOT_TTY:-/dev/tty}" i=0 ok=0 failed=0 deleted=0 ignored=0 ans
   local failed_list=""
-  echo "earshot pending: ${n} meeting(s) to ${MODE}."
+  if [ "${YES}" -eq 0 ]; then
+    # probe in a subshell: a bare `exec 3<x 2>/dev/null` would also silence
+    # stderr (and the prompts) for the rest of the function
+    if ! ( : <"${tty}" ) 2>/dev/null; then
+      echo "earshot pending: no terminal to ask on; rerun with -y to ${MODE} all." >&2
+      return 1
+    fi
+    exec 3<"${tty}"
+  fi
+  echo "earshot pending: ${n} untranscribed meeting(s)."
   for d in "${dirs[@]}"; do
     i=$(( i + 1 ))
     echo
     echo "[${i}/${n}] $(basename "${d}")"
     if [ "${YES}" -eq 0 ]; then
-      if [ ! -r "${tty}" ]; then
-        echo "earshot pending: no terminal to ask on; rerun with -y to ${MODE} all." >&2
-        return 1
-      fi
-      printf '  %s this one? [Y]es / [s]kip / [q]uit: ' "${MODE}" >&2
-      ans=""; IFS= read -r ans 2>/dev/null < "${tty}" || ans="q"
-      case "${ans}" in
-        ""|y|Y|yes) ;;
-        s|S|skip)  skipped=$(( skipped + 1 )); continue ;;
-        *)         echo "  stopping."; break ;;
+      local act=""
+      while [ -z "${act}" ]; do
+        printf '  [t]ranscribe (%s) / [d]elete recording / [i]gnore / [q]uit: ' "${MODE}" >&2
+        ans=""; IFS= read -r ans <&3 || ans="q"   # EOF = quit, never loop
+        case "${ans}" in
+          ""|t|T|transcribe) act="run" ;;
+          d|D|delete)        act="delete" ;;
+          i|I|ignore)        act="ignore" ;;
+          q|Q|quit)          act="quit" ;;
+          *) echo "  answer t, d, i, or q." >&2 ;;
+        esac
+      done
+      case "${act}" in
+        quit) echo "  stopping."; break ;;
+        ignore)
+          # persistent: the marker hides it from pending until removed
+          : > "${d}/.earshot-ignore"
+          ignored=$(( ignored + 1 ))
+          echo "  ignored (pending won't offer it again; delete ${d}/.earshot-ignore to undo)."
+          continue ;;
+        delete)
+          printf '  permanently delete %s and its audio? [y/N]: ' "$(basename "${d}")" >&2
+          ans=""; IFS= read -r ans <&3 || ans=""
+          case "${ans}" in
+            y|Y|yes)
+              if [ -f "${d}/meeting.json" ] || [ -f "${d}/far_remote.wav" ] \
+                 || [ -f "${d}/far_remote.flac" ] || [ -f "${d}/near_me.wav" ] \
+                 || [ -f "${d}/near_me.flac" ]; then
+                rm -rf -- "${d}"
+                deleted=$(( deleted + 1 ))
+                echo "  deleted."
+              else
+                echo "  refusing: ${d} doesn't look like a meeting folder." >&2
+              fi ;;
+            *) echo "  kept (not deleted)." ;;
+          esac
+          continue ;;
       esac
     fi
-    if "$0" "${MODE}" "${d}" ${PASS[@]+"${PASS[@]}"}; then
+    if "$0" "${MODE}" "${d}" ${PASS[@]+"${PASS[@]}"} 3<&-; then
       ok=$(( ok + 1 ))
     else
       failed=$(( failed + 1 ))
       failed_list="${failed_list}    ${d}"$'\n'
       if [ "${YES}" -eq 0 ] && [ "${i}" -lt "${n}" ]; then
         printf '  that one failed; continue with the rest? [Y/n]: ' >&2
-        ans=""; IFS= read -r ans 2>/dev/null < "${tty}" || ans="n"
+        ans=""; IFS= read -r ans <&3 || ans="n"
         case "${ans}" in n|N|no) break ;; esac
       fi
     fi
   done
+  [ "${YES}" -eq 0 ] && exec 3<&-
   echo
-  echo "earshot pending: ${ok} done, ${skipped} skipped, ${failed} failed."
+  echo "earshot pending: ${ok} transcribed, ${deleted} deleted, ${ignored} ignored, ${failed} failed."
   [ -n "${failed_list}" ] && printf '  failed:\n%s' "${failed_list}"
   [ "${failed}" -eq 0 ]
 }

@@ -143,11 +143,19 @@ to give it fifteen more minutes. A plain Enter still stops immediately.
 
 **Catching up on a backlog:** `earshot pending` scans your meeting folders
 (base, business, and personal) for recordings that never got transcribed.
-`earshot pending --offload` walks them one at a time, asking offload / skip /
-quit for each and waiting for each job to finish before starting the next; any
-extra arguments pass through (`--summarize`), `-y` runs them all unattended, and
-`--process` does the same locally. A folder that's still being recorded is left
-alone.
+`earshot pending --offload` walks them one at a time and asks what to do with
+each:
+
+- **transcribe** (Enter) offloads it and waits for the job to finish before
+  moving to the next;
+- **delete recording** removes the meeting folder after a second confirmation;
+- **ignore** leaves it alone for good: a `.earshot-ignore` marker keeps it out of
+  `pending` (`earshot pending --all` still lists it; delete the marker to undo);
+- **quit** stops the walk.
+
+Extra arguments pass through to each offload (`--summarize`), `--process` does
+the same locally, and `-y` transcribes everything unattended (it never deletes).
+A folder that's still being recorded is left alone.
 
 **In-person meetings:** `earshot rec --in-person` records only the mic, into
 the far channel, because a room mic hears everyone (you included). No

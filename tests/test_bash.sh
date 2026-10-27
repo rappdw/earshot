@@ -331,6 +331,65 @@ check_not "help stops at marker (no code leaks)" "set -euo" "$OUT"
 check_not "help omits the marker itself" "==help-end==" "$OUT"
 
 # ==========================================================================
+echo "[rec] anticipated duration: prompted, flag, and validation"
+printf '45\n' > "${WORK}/tty-dur"
+OUT="$(EARSHOT_TTY="${WORK}/tty-dur" "${EARSHOT}" rec -p obsbot -t d1 -o "${WORK}/recd1" 2>&1 </dev/null || true)"
+check "prompts for anticipated duration" "Anticipated duration in minutes" "$OUT"
+check "answer becomes the stop time" "will stop after 45 min" "$OUT"
+printf '99\n' > "${WORK}/tty-dur2"
+OUT="$(EARSHOT_TTY="${WORK}/tty-dur2" "${EARSHOT}" rec -p obsbot -t d2 -d 30 -o "${WORK}/recd2" 2>&1 </dev/null || true)"
+check "-d sets the stop time" "will stop after 30 min" "$OUT"
+check_not "-d skips the prompt" "Anticipated duration" "$OUT"
+printf 'abc\n' > "${WORK}/tty-dur3"
+OUT="$(EARSHOT_TTY="${WORK}/tty-dur3" "${EARSHOT}" rec -p obsbot -t d3 -o "${WORK}/recd3" 2>&1 </dev/null || true)"
+check "non-numeric answer falls back to no limit" "isn't a number of minutes" "$OUT"
+OUT="$("${EARSHOT}" rec -p obsbot -t d4 -d abc -o "${WORK}/recd4" 2>&1 </dev/null)"; RC=$?
+[ "$RC" -ne 0 ] && ok "-d with junk exits non-zero" || fail "-d with junk exits non-zero"
+check "-d junk explains" "duration must be whole minutes" "$OUT"
+
+# ==========================================================================
+echo "[pending] finds untranscribed meetings and walks them one by one"
+PB="${WORK}/meet/business"; mkdir -p "${PB}"
+mk() { mkdir -p "${PB}/$1"; head -c 2048 /dev/zero > "${PB}/$1/far_remote.wav"; }
+mk 2026-10-01_090000_done; echo '{}' > "${PB}/2026-10-01_090000_done/meeting.json"
+echo '{"segments":[]}' > "${PB}/2026-10-01_090000_done/transcript.json"
+mk 2026-10-02_090000_todo; echo '{"duration_sec": 3600, "mode": "call"}' > "${PB}/2026-10-02_090000_todo/meeting.json"
+mkdir -p "${PB}/2026-10-03_090000_empty"; : > "${PB}/2026-10-03_090000_empty/far_remote.wav"
+echo '{}' > "${PB}/2026-10-03_090000_empty/meeting.json"
+mk 2026-10-04_090000_live          # no meeting.json + fresh audio = still recording
+mk 2026-09-01_090000_crashed; touch -t 202609010900 "${PB}/2026-09-01_090000_crashed/far_remote.wav"
+OUT="$("${EARSHOT}" pending 2>&1)"
+check "lists the untranscribed meeting" "2026-10-02_090000_todo" "$OUT"
+check "lists a crashed recording (no meeting.json, old audio)" "2026-09-01_090000_crashed" "$OUT"
+check "shows the meeting length" "01:00:00" "$OUT"
+check_not "skips transcribed meetings" "2026-10-01_090000_done" "$OUT"
+check_not "skips empty audio" "2026-10-03_090000_empty" "$OUT"
+check_not "skips a recording in progress" "2026-10-04_090000_live" "$OUT"
+FV2="${WORK}/fakevenv2"; mkdir -p "${FV2}/bin"
+cat > "${FV2}/bin/python" <<'EOF'
+#!/bin/sh
+# meetings.py runs for real (it builds the backlog); pipeline tools are logged
+case "$1" in *meetings.py) exec python3 "$@" ;; esac
+for a in "$@"; do case "$a" in *.py) echo "PY:$(basename "$a") $*";; esac; done
+exit 0
+EOF
+chmod +x "${FV2}/bin/python"
+OUT="$(EARSHOT_VENV="${FV2}" "${EARSHOT}" pending --process -y 2>&1)"; RC=$?
+[ "$RC" -eq 0 ] && ok "pending --process -y exits 0" || fail "pending --process -y exits 0 ($OUT)"
+check "walks meeting 1 of 2" "[1/2] 2026-10-02_090000_todo" "$OUT"
+check "walks meeting 2 of 2" "[2/2] 2026-09-01_090000_crashed" "$OUT"
+check "runs the pipeline on each" "PY:transcribe.py" "$OUT"
+check "summary counts both" "2 done, 0 skipped, 0 failed" "$OUT"
+printf 's\n' > "${WORK}/tty-skip"
+OUT="$(EARSHOT_TTY="${WORK}/tty-skip" EARSHOT_VENV="${FV2}" "${EARSHOT}" pending --process 2>&1)"
+check "asks per meeting" "process this one?" "$OUT"
+check "skip answers are honored" "0 done, 2 skipped, 0 failed" "$OUT"
+check_not "nothing ran when skipped" "PY:transcribe.py" "$OUT"
+OUT="$(EARSHOT_TTY="${WORK}/no-such-tty" EARSHOT_VENV="${FV2}" "${EARSHOT}" pending --offload 2>&1)"; RC=$?
+[ "$RC" -ne 0 ] && ok "no terminal and no -y refuses" || fail "no terminal and no -y refuses"
+check "explains -y" "rerun with -y" "$OUT"
+
+# ==========================================================================
 echo
 echo "bash tests: ${PASS} passed, ${FAIL} failed"
 [ "${FAIL}" -eq 0 ]

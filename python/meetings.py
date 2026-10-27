@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """earshot meetings tooling: list / grep / clean across your meeting roots.
 
-  list   pipeline status per meeting (audio, transcript, diarization, notes)
+  list    pipeline status per meeting (audio, transcript, diarization, notes)
+  pending meetings with audio but no transcript yet (the offload backlog)
   grep   search across transcripts with speaker + timestamp context
   clean  reclaim disk: FLAC-compress (or purge) meeting audio older than N days
          (dry-run by default; --apply executes)
@@ -17,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 AUDIO_BASES = ("far_remote", "near_me")
 
@@ -111,6 +113,74 @@ def cmd_list(args):
 
 
 # ---------------------------------------------------------------------------
+# A recording that's still running has audio but no meeting.json yet (rec
+# writes it on stop). Without meeting.json AND audio touched this recently,
+# leave the folder alone; older ones are crashed recordings worth processing.
+IN_PROGRESS_SECS = 600
+MIN_AUDIO_BYTES = 1024   # a bare wav header or an aborted start is not audio
+
+
+def channel_audio(d):
+    """Non-trivial far/near capture files (monitor copy excluded)."""
+    out = []
+    for base in AUDIO_BASES:
+        for ext in (".wav", ".flac"):
+            p = os.path.join(d, base + ext)
+            if os.path.isfile(p) and os.path.getsize(p) >= MIN_AUDIO_BYTES:
+                out.append(p)
+    return out
+
+
+def pending_meetings(now=None):
+    """[(root, dir, info)] for meetings with usable audio but no transcript,
+    newest first. info carries what the listing shows."""
+    now = time.time() if now is None else now
+    out = []
+    for root, d in meetings():
+        if os.path.isfile(os.path.join(d, "transcript.json")):
+            continue
+        audio = channel_audio(d)
+        if not audio:
+            continue
+        meta = {}
+        mj = os.path.join(d, "meeting.json")
+        if os.path.isfile(mj):
+            try:
+                with open(mj, "r", encoding="utf-8") as fh:
+                    meta = json.load(fh)
+            except Exception:
+                meta = {}
+        elif now - max(os.path.getmtime(p) for p in audio) < IN_PROGRESS_SECS:
+            continue  # likely still recording
+        out.append((root, d, {
+            "duration_sec": meta.get("duration_sec"),
+            "mode": meta.get("mode") or "call",
+            "bytes": sum(os.path.getsize(p) for p in audio),
+        }))
+    return out
+
+
+def cmd_pending(args):
+    rows = pending_meetings()
+    if args.paths:
+        for _, d, _ in rows:
+            print(d)
+        return
+    if not rows:
+        print("nothing pending: every meeting with audio has a transcript")
+        return
+    print(f"{'meeting':44} {'ctx':9} {'mode':9} {'length':>8}  size")
+    for root, d, info in rows:
+        dur = info["duration_sec"]
+        length = fmt_ts(dur) if isinstance(dur, (int, float)) else "?"
+        print(f"{os.path.basename(d)[:44]:44} "
+              f"{os.path.basename(root.rstrip('/'))[:9]:9} {info['mode'][:9]:9} "
+              f"{length:>8}  {info['bytes'] / 1e6:5.0f}MB")
+    print(f"\n{len(rows)} meeting(s) untranscribed. "
+          "Walk through them: earshot pending --offload")
+
+
+# ---------------------------------------------------------------------------
 def cmd_grep(args):
     rx = re.compile(args.pattern, re.IGNORECASE)
     hits = 0
@@ -194,13 +264,18 @@ def cmd_clean(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="List, search, and clean earshot meetings.")
+    ap = argparse.ArgumentParser(description="List, search, find pending, and clean earshot meetings.")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("list", help="pipeline status per meeting")
     p.add_argument("--all", action="store_true")
     p.add_argument("--limit", type=int, default=15)
     p.set_defaults(fn=cmd_list)
+
+    p = sub.add_parser("pending", help="meetings with audio but no transcript")
+    p.add_argument("--paths", action="store_true",
+                   help="print one meeting directory per line (for scripts)")
+    p.set_defaults(fn=cmd_pending)
 
     p = sub.add_parser("grep", help="search transcripts (regex, case-insensitive)")
     p.add_argument("pattern")

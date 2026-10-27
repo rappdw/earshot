@@ -12,6 +12,7 @@
 #   earshot list                pipeline status of recent meetings (ls)
 #   earshot grep PATTERN        search all transcripts (speaker + timestamp)
 #   earshot clean [--apply]     compress/purge old meeting audio (dry-run default)
+#   earshot pending [--offload] untranscribed meetings; walk them one by one
 #   earshot enroll NAME ...     add a voice to the speaker library
 #   earshot speakers [list|remove|rename] ...   manage the speaker library
 #   earshot offload DIR ...     run transcribe/diarize on the DGX Spark over SSH
@@ -27,7 +28,10 @@
 #   --auto-stop N    stop after N sec with BOTH you and the call silent
 #                    (in-person: room silence). Default from config.
 #   --no-auto-stop   disable silence auto-stop for this recording
-#   --max-min N      hard cap recording length in minutes (0 = no cap)
+#   -d, --duration N anticipated length in minutes; recording stops when it
+#                    runs out (prompted for if omitted; 0 = no limit). Type
+#                    +N and Enter while recording to extend by N minutes.
+#   --max-min N      same as --duration
 #   --monitor        also write monitor_stereo.wav (off by default; doubles disk)
 #   --in-person      in-person meeting: record only the mic, into the far
 #                    channel (no BlackHole needed). Everyone in the room, you
@@ -398,10 +402,8 @@ cmd_process() {
   echo "earshot process: done -> ${DIR}"
 }
 
-# list/grep/clean operate across the configured meeting roots.
-run_meetings() {
-  local sub="$1"; shift
-  load_config
+# list/grep/clean/pending operate across the configured meeting roots.
+export_meeting_roots() {
   local r="" x
   for x in "${EARSHOT_OUT_ROOT:-${HOME}/Notes/meetings}" \
            "${EARSHOT_OUT_ROOT_BUSINESS:-${EARSHOT_OUT_ROOT:-${HOME}/Notes/meetings}/business}" \
@@ -409,8 +411,85 @@ run_meetings() {
     [ -d "${x}" ] && r="${r:+${r}:}${x}"
   done
   export EARSHOT_ROOTS="${r}"
+}
+
+run_meetings() {
+  local sub="$1"; shift
+  load_config
+  export_meeting_roots
   export EARSHOT_CLEAN_DAYS
   run_tool meetings.py any "${sub}" "$@"
+}
+
+# pending: list meetings with audio but no transcript; with --offload (or
+# --process) walk them one at a time, each finishing before the next starts.
+cmd_pending() {
+  local MODE="list" YES=0 PASS=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --offload) MODE="offload"; shift ;;
+      --process) MODE="process"; shift ;;
+      -y|--yes)  YES=1; shift ;;
+      -h|--help)
+        echo "usage: earshot pending                         list untranscribed meetings"
+        echo "       earshot pending --offload [-y] [ARGS]   offload them one by one"
+        echo "       earshot pending --process [-y] [ARGS]   same, on this machine"
+        echo "ARGS pass through to each offload/process run (e.g. --summarize)."
+        echo "-y runs every meeting without asking."
+        exit 0 ;;
+      *) PASS+=("$1"); shift ;;
+    esac
+  done
+  if [ "${MODE}" = "list" ]; then
+    run_meetings pending ${PASS[@]+"${PASS[@]}"}
+  fi
+
+  local dirs=() d
+  while IFS= read -r d; do
+    [ -n "${d}" ] && dirs+=("${d}")
+  done < <(run_meetings pending --paths)
+  local n=${#dirs[@]}
+  if [ "${n}" -eq 0 ]; then
+    echo "earshot pending: nothing to ${MODE}; every meeting with audio has a transcript."
+    return 0
+  fi
+
+  local tty="${EARSHOT_TTY:-/dev/tty}" i=0 ok=0 skipped=0 failed=0 ans
+  local failed_list=""
+  echo "earshot pending: ${n} meeting(s) to ${MODE}."
+  for d in "${dirs[@]}"; do
+    i=$(( i + 1 ))
+    echo
+    echo "[${i}/${n}] $(basename "${d}")"
+    if [ "${YES}" -eq 0 ]; then
+      if [ ! -r "${tty}" ]; then
+        echo "earshot pending: no terminal to ask on; rerun with -y to ${MODE} all." >&2
+        return 1
+      fi
+      printf '  %s this one? [Y]es / [s]kip / [q]uit: ' "${MODE}" >&2
+      ans=""; IFS= read -r ans 2>/dev/null < "${tty}" || ans="q"
+      case "${ans}" in
+        ""|y|Y|yes) ;;
+        s|S|skip)  skipped=$(( skipped + 1 )); continue ;;
+        *)         echo "  stopping."; break ;;
+      esac
+    fi
+    if "$0" "${MODE}" "${d}" ${PASS[@]+"${PASS[@]}"}; then
+      ok=$(( ok + 1 ))
+    else
+      failed=$(( failed + 1 ))
+      failed_list="${failed_list}    ${d}"$'\n'
+      if [ "${YES}" -eq 0 ] && [ "${i}" -lt "${n}" ]; then
+        printf '  that one failed; continue with the rest? [Y/n]: ' >&2
+        ans=""; IFS= read -r ans 2>/dev/null < "${tty}" || ans="n"
+        case "${ans}" in n|N|no) break ;; esac
+      fi
+    fi
+  done
+  echo
+  echo "earshot pending: ${ok} done, ${skipped} skipped, ${failed} failed."
+  [ -n "${failed_list}" ] && printf '  failed:\n%s' "${failed_list}"
+  [ "${failed}" -eq 0 ]
 }
 
 # ===========================================================================
@@ -671,7 +750,7 @@ cmd_record() {
   local BLACKHOLE_NAME="${EARSHOT_BLACKHOLE_NAME:-BlackHole 2ch}"
   local AUTOSTOP="${EARSHOT_AUTOSTOP_SILENCE:-180}"
   local SILENCE_DB="${EARSHOT_SILENCE_DB:--50dB}"
-  local MAX_MIN="${EARSHOT_MAX_MINUTES:-0}"
+  local MAX_MIN="${EARSHOT_MAX_MINUTES:-0}" DURATION_SET=0
   local MONITOR="${EARSHOT_MONITOR:-0}"
   local INPERSON=0
   local AFTER="${EARSHOT_AFTER_REC:-}"
@@ -686,7 +765,8 @@ cmd_record() {
       -r|--rate)      RATE="$2";    shift 2 ;;
       --auto-stop)    AUTOSTOP="$2"; shift 2 ;;
       --no-auto-stop) AUTOSTOP=0;   shift ;;
-      --max-min)      MAX_MIN="$2"; shift 2 ;;
+      -d|--duration|--max-min)
+                      need_val "$1" "${2:-}"; MAX_MIN="$2"; DURATION_SET=1; shift 2 ;;
       --monitor)      MONITOR=1;    shift ;;
       --in-person)    INPERSON=1;   shift ;;
       --then)         need_val "$1" "${2:-}"; AFTER="$2"; shift 2 ;;
@@ -709,11 +789,32 @@ cmd_record() {
     OUT_ROOT="${EARSHOT_OUT_ROOT:-${HOME}/Notes/meetings}"
   fi
 
+  # Prompts read the terminal (EARSHOT_TTY overrides for tests).
+  local TTY_IN="${EARSHOT_TTY:-/dev/tty}"
   # prompt for a title when one was not given (skip with empty input)
-  if [ -z "${TITLE}" ] && [ -r /dev/tty ]; then
-    printf 'Meeting title (Enter to skip): ' > /dev/tty
-    IFS= read -r TITLE < /dev/tty || TITLE=""
+  if [ -z "${TITLE}" ] && [ -r "${TTY_IN}" ]; then
+    printf 'Meeting title (Enter to skip): ' >&2
+    IFS= read -r TITLE 2>/dev/null < "${TTY_IN}" || TITLE=""
   fi
+  # ...and for the anticipated duration: the recording stops when it runs out.
+  # The config's EARSHOT_MAX_MINUTES, if set, is the default.
+  if [ "${DURATION_SET}" -eq 0 ] && [ -r "${TTY_IN}" ]; then
+    local dur_def="no limit" dur_in=""
+    [ "${MAX_MIN}" -gt 0 ] 2>/dev/null && dur_def="${MAX_MIN}"
+    printf 'Anticipated duration in minutes (Enter for %s): ' "${dur_def}" >&2
+    IFS= read -r dur_in 2>/dev/null < "${TTY_IN}" || dur_in=""
+    dur_in="$(printf '%s' "${dur_in}" | tr -d '[:space:]')"
+    if [ -n "${dur_in}" ]; then
+      case "${dur_in}" in
+        *[!0-9]*) echo "earshot: '${dur_in}' isn't a number of minutes; recording with no time limit." >&2
+                  MAX_MIN=0 ;;
+        *)        MAX_MIN=$(( 10#${dur_in} )) ;;
+      esac
+    fi
+  fi
+  case "${MAX_MIN}" in ""|*[!0-9]*)
+    echo "earshot: duration must be whole minutes (got '${MAX_MIN}')" >&2; exit 1 ;;
+  esac
 
   if ! earshot_load_profile "${PROFILE}"; then
     echo "earshot: unknown profile '${PROFILE}' (check earshot.conf)" >&2
@@ -821,7 +922,9 @@ cmd_record() {
       echo "earshot: will auto-stop after ${AUTOSTOP}s with BOTH you and the call silent (--no-auto-stop to disable)."
     fi
   fi
-  [ "${MAX_MIN}" -gt 0 ] 2>/dev/null && echo "earshot: hard cap ${MAX_MIN} min."
+  if [ "${MAX_MIN}" -gt 0 ]; then
+    echo "earshot: will stop after ${MAX_MIN} min (type +N and Enter to extend by N min)."
+  fi
 
   # channel_silent LOG -> echoes 1 if that channel is CURRENTLY in a sustained
   # (>= AUTOSTOP) silence: silencedetect logs one silence_start when a silence
@@ -837,11 +940,26 @@ cmd_record() {
   # Watch loop: stop on Enter, on sustained silence (BOTH channels), on max
   # duration, or if a recorder dies (falls through as "recorder-exited").
   # Ctrl-C/TERM still works via the trap.
-  local t0=$SECONDS stop_reason="recorder-exited"
+  local t0=$SECONDS stop_reason="recorder-exited" line="" warned=0
   while kill -0 "${FAR_PID}" 2>/dev/null \
         && { [ -z "${NEAR_PID}" ] || kill -0 "${NEAR_PID}" 2>/dev/null; }; do
     if [ -r /dev/tty ]; then
-      if read -t 2 -r _ </dev/tty; then stop_reason="manual"; break; fi
+      if read -t 2 -r line </dev/tty; then
+        # "+N" extends the time limit by N minutes; any other line stops
+        case "${line}" in
+          +[0-9]*)
+            local add="${line#+}"; add="${add%%[!0-9]*}"
+            if [ "${MAX_MIN}" -gt 0 ]; then
+              MAX_MIN=$(( MAX_MIN + 10#${add} ))
+            else  # no limit yet: N more minutes from now
+              MAX_MIN=$(( (SECONDS - t0) / 60 + 10#${add} ))
+            fi
+            warned=0
+            echo "earshot: extended; now stopping at ${MAX_MIN} min."
+            continue ;;
+          *) stop_reason="manual"; break ;;
+        esac
+      fi
     else
       sleep 2
     fi
@@ -855,8 +973,15 @@ cmd_record() {
         stop_reason="silence"; break
       fi
     fi
-    if [ "${MAX_MIN}" -gt 0 ] 2>/dev/null && [ "$(( SECONDS - t0 ))" -ge "$(( MAX_MIN * 60 ))" ]; then
-      stop_reason="max-duration"; break
+    if [ "${MAX_MIN}" -gt 0 ]; then
+      local left=$(( MAX_MIN * 60 - (SECONDS - t0) ))
+      if [ "${left}" -le 0 ]; then stop_reason="max-duration"; break; fi
+      # meetings run over: one heads-up ~2 min before the cutoff
+      if [ "${warned}" -eq 0 ] && [ "${left}" -le 120 ]; then
+        warned=1
+        echo "earshot: stopping in ~$(( (left + 59) / 60 )) min; type +N and Enter to extend by N min."
+        notify "earshot" "Recording stops in ~$(( (left + 59) / 60 )) min"
+      fi
     fi
   done
   local DURATION_SEC=$(( SECONDS - t0 ))
@@ -1003,6 +1128,7 @@ case "${1:-}" in
   list|ls)        shift; run_meetings list "$@" ;;
   grep|search)    shift; run_meetings grep "$@" ;;
   clean)          shift; run_meetings clean "$@" ;;
+  pending)        shift; cmd_pending "$@" ;;
   enroll)         shift; run_speakers enroll "$@" ;;
   speakers|spk)   shift; run_speakers "$@" ;;
   offload)        shift; cmd_offload "$@" ;;

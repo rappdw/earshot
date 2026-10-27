@@ -107,6 +107,7 @@ parallel processes, resolved by device name.
 earshot devices                       # list audio inputs and current indices
 earshot rec                           # record (prompts for a title)
 earshot rec -c personal -t "Mom"      # personal context, titled
+earshot rec -t "Standup" -d 30        # stop after 30 minutes (prompted if omitted)
 earshot rec --in-person -t "1:1 Sam"  # in-person meeting: mic only, no BlackHole
 earshot transcribe DIR                # faster-whisper -> transcript.json + .md
 earshot diarize DIR                   # split REMOTE into speakers, attribute names
@@ -117,6 +118,8 @@ earshot attribute DIR                 # name unknown voices by ear, learn them
 earshot enroll Dan --from DIR --speaker REMOTE-1   # teach a voice from a meeting
 earshot speakers list                 # who's enrolled
 earshot list                          # pipeline status of recent meetings
+earshot pending                       # meetings with audio but no transcript yet
+earshot pending --offload             # offload that backlog one meeting at a time
 earshot grep "kong migration"         # search every transcript
 earshot clean --apply                 # FLAC-compress old audio (dry-run w/o --apply)
 earshot timing DIR                    # transcript-vs-audio alignment check
@@ -131,6 +134,20 @@ recording off early. `meeting.json` records the `stop_reason`
 (`manual`/`silence`/`max-duration`/`interrupted`/`recorder-exited`) and
 `duration_sec`, so an unexpectedly short recording is easy to diagnose after the
 fact. See `earshot rec -h` and the config for the auto-stop knobs.
+
+**Anticipated duration:** after the title, `rec` asks how long the meeting
+should run and stops when that time is up (`stop_reason: max-duration`). Enter
+means no limit; `-d N` answers up front. Meetings run over, so about two minutes
+before the cutoff it warns you (and posts a notification): type `+15` and Enter
+to give it fifteen more minutes. A plain Enter still stops immediately.
+
+**Catching up on a backlog:** `earshot pending` scans your meeting folders
+(base, business, and personal) for recordings that never got transcribed.
+`earshot pending --offload` walks them one at a time, asking offload / skip /
+quit for each and waiting for each job to finish before starting the next; any
+extra arguments pass through (`--summarize`), `-y` runs them all unattended, and
+`--process` does the same locally. A folder that's still being recorded is left
+alone.
 
 **In-person meetings:** `earshot rec --in-person` records only the mic, into
 the far channel, because a room mic hears everyone (you included). No

@@ -553,6 +553,20 @@ class TestMeetings(unittest.TestCase):
     def _env(self, d):
         return mock.patch.dict(os.environ, {"EARSHOT_ROOTS": d})
 
+    def test_pending_length_falls_back_to_audio(self):
+        # recordings older than duration_sec in meeting.json: ask ffprobe
+        with tempfile.TemporaryDirectory() as root:
+            d = os.path.join(root, "2026-07-01_090000_old")
+            os.makedirs(d)
+            with open(os.path.join(d, "far_remote.wav"), "wb") as fh:
+                fh.write(b"\0" * 4096)
+            with open(os.path.join(d, "meeting.json"), "w") as fh:
+                fh.write("{}")
+            with mock.patch.dict(os.environ, {"EARSHOT_ROOTS": root}), \
+                 mock.patch.object(meetings, "audio_seconds", return_value=1845.0):
+                rows = meetings.pending_meetings()
+            self.assertEqual(rows[0][2]["duration_sec"], 1845.0)
+
     def test_list_shows_status(self):
         with tempfile.TemporaryDirectory() as d:
             _fixture_tree(d)

@@ -132,6 +132,19 @@ def channel_audio(d):
     return out
 
 
+def audio_seconds(path):
+    """Length of an audio file via ffprobe (reads the header, so it's fast),
+    or None if ffprobe is missing or can't tell."""
+    try:
+        p = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", path],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+        return float(p.stdout.decode().strip())
+    except Exception:
+        return None
+
+
 def pending_meetings(now=None, include_ignored=False):
     """[(root, dir, info)] for meetings with usable audio but no transcript,
     newest first. info carries what the listing shows. Meetings the user
@@ -157,8 +170,13 @@ def pending_meetings(now=None, include_ignored=False):
                 meta = {}
         elif now - max(os.path.getmtime(p) for p in audio) < IN_PROGRESS_SECS:
             continue  # likely still recording
+        dur = meta.get("duration_sec")
+        if not isinstance(dur, (int, float)):
+            # older recordings predate duration_sec: ask the audio itself
+            lens = [x for x in (audio_seconds(p) for p in audio) if x]
+            dur = max(lens) if lens else None
         out.append((root, d, {
-            "duration_sec": meta.get("duration_sec"),
+            "duration_sec": dur,
             "mode": meta.get("mode") or "call",
             "bytes": sum(os.path.getsize(p) for p in audio),
             "ignored": ignored,
@@ -173,6 +191,13 @@ def cmd_pending(args):
     if args.paths:
         for _, d, _ in rows:
             print(d)
+        return
+    if args.rows:
+        # dir <TAB> length <TAB> MB, for the interactive walk
+        for _, d, info in rows:
+            dur = info["duration_sec"]
+            length = fmt_ts(dur) if isinstance(dur, (int, float)) else "?"
+            print(f"{d}\t{length}\t{info['bytes'] / 1e6:.0f}")
         return
     note = (f"{hidden} ignored meeting(s) hidden (--all to show)" if hidden else "")
     if not rows:
@@ -289,6 +314,8 @@ def main():
     p = sub.add_parser("pending", help="meetings with audio but no transcript")
     p.add_argument("--paths", action="store_true",
                    help="print one meeting directory per line (for scripts)")
+    p.add_argument("--rows", action="store_true",
+                   help="print dir, length, and size in MB, tab-separated (for scripts)")
     p.add_argument("--all", action="store_true",
                    help="include meetings marked ignored")
     p.set_defaults(fn=cmd_pending)

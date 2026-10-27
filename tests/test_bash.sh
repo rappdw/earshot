@@ -377,6 +377,7 @@ chmod +x "${FV2}/bin/python"
 OUT="$(EARSHOT_VENV="${FV2}" "${EARSHOT}" pending --process -y 2>&1)"; RC=$?
 [ "$RC" -eq 0 ] && ok "pending --process -y exits 0" || fail "pending --process -y exits 0 ($OUT)"
 check "walks meeting 1 of 2" "[1/2] 2026-10-02_090000_todo" "$OUT"
+check "shows length and size (MB) per meeting" "[1/2] 2026-10-02_090000_todo  01:00:00 (0 MB)" "$OUT"
 check "walks meeting 2 of 2" "[2/2] 2026-09-01_090000_crashed" "$OUT"
 check "runs the pipeline on each" "PY:transcribe.py" "$OUT"
 check "summary counts both" "2 transcribed, 0 deleted, 0 ignored, 0 failed" "$OUT"

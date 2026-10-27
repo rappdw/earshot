@@ -446,10 +446,11 @@ cmd_pending() {
     run_meetings pending ${PASS[@]+"${PASS[@]}"}
   fi
 
-  local dirs=() d
-  while IFS= read -r d; do
-    [ -n "${d}" ] && dirs+=("${d}")
-  done < <(run_meetings pending --paths)
+  local dirs=() lens=() sizes=() d len mb
+  while IFS=$'\t' read -r d len mb; do
+    [ -n "${d}" ] || continue
+    dirs+=("${d}"); lens+=("${len}"); sizes+=("${mb}")
+  done < <(run_meetings pending --rows)
   local n=${#dirs[@]}
   if [ "${n}" -eq 0 ]; then
     echo "earshot pending: nothing to ${MODE}; every meeting with audio has a transcript."
@@ -473,7 +474,7 @@ cmd_pending() {
   for d in "${dirs[@]}"; do
     i=$(( i + 1 ))
     echo
-    echo "[${i}/${n}] $(basename "${d}")"
+    echo "[${i}/${n}] $(basename "${d}")  ${lens[$((i-1))]} (${sizes[$((i-1))]} MB)"
     if [ "${YES}" -eq 0 ]; then
       local act=""
       while [ -z "${act}" ]; do
